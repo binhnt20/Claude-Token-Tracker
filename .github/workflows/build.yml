@@ -21,19 +21,18 @@ jobs:
         run: brew install create-dmg
 
       - name: Build .app and .dmg
-        working-directory: claude-token-tracker
         run: python build.py
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
-          path: claude-token-tracker/dist/*.dmg
+          path: dist/*.dmg
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: macos-app
-          path: claude-token-tracker/dist/*.app
+          path: dist/*.app
 
   build-linux:
     runs-on: ubuntu-22.04
@@ -61,7 +60,6 @@ jobs:
           chmod +x /usr/local/bin/appimagetool
 
       - name: Build .AppImage
-        working-directory: claude-token-tracker
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: python build.py
@@ -69,13 +67,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
-          path: claude-token-tracker/dist/*.AppImage
+          path: dist/*.AppImage
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: linux-binary
-          path: claude-token-tracker/dist/claude-token-tracker
+          path: dist/claude-token-tracker
 
   build-windows:
     runs-on: windows-latest
@@ -89,13 +87,12 @@ jobs:
         run: pip install pyinstaller pywebview
 
       - name: Build .exe
-        working-directory: claude-token-tracker
         run: python build.py
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: claude-token-tracker/dist/*.exe
+          path: dist/*.exe
 
   release:
     needs: [build-macos, build-linux, build-windows]
@@ -115,7 +112,4 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.AppImage
-            artifacts/**/*.exe
+          files: artifacts/**/*
