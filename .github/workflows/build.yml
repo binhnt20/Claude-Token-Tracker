@@ -23,6 +23,11 @@ jobs:
       - name: Build .app and .dmg
         run: python build.py
 
+      - name: Ad-hoc sign and remove quarantine
+        run: |
+          codesign --force --deep --sign - dist/claude-token-tracker.app
+          xattr -cr dist/claude-token-tracker.app
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
