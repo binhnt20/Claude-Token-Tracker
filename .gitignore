@@ -1,0 +1,19 @@
+# Build outputs
+dist/
+build/
+*.spec
+
+# Generated reports
+token_usage.json
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/

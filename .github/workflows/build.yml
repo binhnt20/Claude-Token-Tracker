@@ -1,0 +1,121 @@
+name: Build Cross-Platform
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyinstaller pywebview
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build .app and .dmg
+        working-directory: claude-token-tracker
+        run: python build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: claude-token-tracker/dist/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-app
+          path: claude-token-tracker/dist/*.app
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgirepository1.0-dev libcairo2-dev \
+            libwebkit2gtk-4.1-dev gir1.2-webkit2-4.1 \
+            libfuse2
+
+      - name: Install Python dependencies
+        run: pip install pyinstaller pywebview
+
+      - name: Download appimagetool
+        run: |
+          wget -q "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+            -O /usr/local/bin/appimagetool
+          chmod +x /usr/local/bin/appimagetool
+
+      - name: Build .AppImage
+        working-directory: claude-token-tracker
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: python build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: claude-token-tracker/dist/*.AppImage
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-binary
+          path: claude-token-tracker/dist/claude-token-tracker
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyinstaller pywebview
+
+      - name: Build .exe
+        working-directory: claude-token-tracker
+        run: python build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: claude-token-tracker/dist/*.exe
+
+  release:
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.AppImage
+            artifacts/**/*.exe
