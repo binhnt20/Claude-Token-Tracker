@@ -51,6 +51,9 @@ def parse_transcript(filepath: Path) -> list[dict]:
                 except json.JSONDecodeError:
                     continue
 
+                if not isinstance(entry, dict):
+                    continue
+
                 if entry.get("type") != "assistant":
                     continue
 
