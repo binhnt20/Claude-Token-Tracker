@@ -4,13 +4,18 @@
 
 ```
 claude-token-tracker/
-├── app.py                  # Entry point chính
+├── app.py                  # Entry point chính (+ --install/--uninstall trên Linux)
 ├── track_tokens.py         # Thu thập dữ liệu từ ~/.claude/projects/
-├── dashboard.py            # Sinh HTML dashboard với Chart.js
+├── pricing.py              # Bảng giá + tính chi phí (API-equivalent)
+├── test_pricing.py         # Test cho pricing.py (unittest)
+├── dashboard.py            # Sinh HTML dashboard với Chart.js + flatpickr
 ├── build.py                # Script build cho từng OS
 ├── gen_icon.py             # Tạo icon (chỉ chạy trên macOS)
 ├── assets/
 │   ├── chart.min.js        # Chart.js v4 (inline vào HTML)
+│   ├── flatpickr.min.js    # Flatpickr - date range picker
+│   ├── flatpickr.min.css   # Flatpickr styles
+│   ├── flatpickr-dark.css  # Flatpickr dark theme
 │   ├── icon.png            # Icon gốc 512x512
 │   ├── icon.icns           # Icon cho macOS
 │   ├── icon.ico            # Icon cho Windows
@@ -56,23 +61,27 @@ python build.py
 
 ### Linux (Ubuntu/Debian)
 
+Bản Linux dùng backend **Qt/QtWebEngine** (tự chứa Chromium) cho cửa sổ native — không phụ thuộc GTK/WebKit của hệ thống, nên tránh được lỗi xung đột thư viện trên Ubuntu 24.04.
+
 ```bash
-# Cài system dependencies cho pywebview
+# Cài thư viện runtime cho QtWebEngine (Chromium)
 sudo apt-get install -y \
-  libgirepository1.0-dev libcairo2-dev \
-  libwebkit2gtk-4.1-dev gir1.2-webkit2-4.1
+  libnss3 libnspr4 libxcomposite1 libxdamage1 libxrandr2 \
+  libxkbcommon0 libasound2 libgbm1 libxtst6 libxshmfence1
+
+# Python deps cho Linux (thêm qtpy + PySide6, khác macOS/Windows)
+pip install pyinstaller pywebview qtpy PySide6
 
 # Cài appimagetool để tạo .AppImage
 wget -q "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
   -O ~/.local/bin/appimagetool
 chmod +x ~/.local/bin/appimagetool
 
-# Build
+# Build (Linux build ở dạng onedir rồi đóng gói thành AppImage)
 python build.py
 
 # Output:
 #   dist/claude-token-tracker-x86_64.AppImage
-#   (hoặc dist/claude-token-tracker nếu không có appimagetool)
 ```
 
 ## Build tự động với GitHub Actions
@@ -136,5 +145,7 @@ Sau khi CI chạy xong:
 
 - **PyInstaller không hỗ trợ cross-compile**: phải build trên chính OS đích, hoặc dùng GitHub Actions.
 - **macOS .app**: có thể bị Gatekeeper chặn khi download. User cần chuột phải → Open lần đầu.
-- **Linux .AppImage**: cần `chmod +x` trước khi chạy.
+- **Linux .AppImage**: cần `chmod +x` trước khi chạy. Ubuntu 24.04 không cài sẵn FUSE — nếu chạy trực tiếp không mở, dùng `./claude-token-tracker-x86_64.AppImage --appimage-extract-and-run` hoặc `sudo apt install libfuse2t64`.
+- **Đưa app vào menu (Linux)**: chạy `./claude-token-tracker-x86_64.AppImage --appimage-extract-and-run --install` để giải nén app vào `~/.local/lib/` và thêm vào menu ứng dụng — mở từ menu **không cần FUSE**. Gỡ bằng `--uninstall`.
+- **Kích thước AppImage**: bản Linux kèm Chromium (QtWebEngine) nên nặng hơn (~150–200MB).
 - **Icon**: đã có sẵn cho cả 3 OS trong `assets/`. Nếu cần đổi icon, sửa `gen_icon.py` và chạy lại (chỉ chạy được trên macOS).
