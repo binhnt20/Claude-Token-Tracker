@@ -38,15 +38,15 @@ Full local build + CI/CD walkthrough (Vietnamese): [DEPLOY.md](DEPLOY.md).
 
 ### Add to the Linux application menu
 
-The `.AppImage` is a single file, so it won't show up in your app menu by default. Register it once, then launch it from the menu like any other app:
+The `.AppImage` is a single file, so it won't show up in your app menu by default. Register it once — this extracts the app into `~/.local/lib/` and adds a menu entry, so it launches from the menu **without needing FUSE**:
 
 ```bash
 chmod +x claude-token-tracker-x86_64.AppImage
-./claude-token-tracker-x86_64.AppImage --install     # adds a menu entry + icon
-./claude-token-tracker-x86_64.AppImage --uninstall   # removes it
+./claude-token-tracker-x86_64.AppImage --appimage-extract-and-run --install     # extract + add menu entry
+./claude-token-tracker-x86_64.AppImage --appimage-extract-and-run --uninstall   # remove app + menu entry
 ```
 
-If it won't launch from the menu, install FUSE: `sudo apt install libfuse2t64`.
+Then search "Claude Token Tracker" in your application menu and launch it like any other app. The `--appimage-extract-and-run` prefix lets the installer run without FUSE on Ubuntu 24.04.
 
 ## CI/CD
 
