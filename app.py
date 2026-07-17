@@ -6,6 +6,7 @@ Scans local Claude Code transcripts and shows an interactive dashboard in a nati
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import webbrowser
@@ -41,6 +42,60 @@ def _setup_macos_dock():
         pass
 
 
+DESKTOP_ID = "claude-token-tracker"
+
+
+def _install_desktop_entry():
+    """Register the AppImage in the Linux application menu (~/.local/share)."""
+    appimage = os.environ.get("APPIMAGE")
+    if not appimage:
+        print("  --install only works when running from the .AppImage.")
+        return
+
+    apps_dir = Path.home() / ".local" / "share" / "applications"
+    icons_dir = Path.home() / ".local" / "share" / "icons"
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    icons_dir.mkdir(parents=True, exist_ok=True)
+
+    icon_dest = icons_dir / f"{DESKTOP_ID}.png"
+    icon_src = ASSETS_DIR / "icon.png"
+    if icon_src.exists():
+        import shutil
+        shutil.copy2(icon_src, icon_dest)
+    icon_value = str(icon_dest) if icon_dest.exists() else "utilities-system-monitor"
+
+    desktop = apps_dir / f"{DESKTOP_ID}.desktop"
+    desktop.write_text(
+        "[Desktop Entry]\n"
+        f"Name={APP_NAME}\n"
+        "Comment=Claude Code token usage dashboard\n"
+        f"Exec={appimage}\n"
+        f"Icon={icon_value}\n"
+        "Type=Application\n"
+        "Categories=Utility;Development;\n"
+        "Terminal=false\n",
+        encoding="utf-8",
+    )
+    print(f"  Installed: {desktop}")
+    print(f'  Search "{APP_NAME}" in your application menu to launch it.')
+    print("  If it does not launch from the menu, install FUSE: sudo apt install libfuse2t64")
+
+
+def _uninstall_desktop_entry():
+    """Remove the Linux application-menu entry created by --install."""
+    removed = False
+    for p in (
+        Path.home() / ".local" / "share" / "applications" / f"{DESKTOP_ID}.desktop",
+        Path.home() / ".local" / "share" / "icons" / f"{DESKTOP_ID}.png",
+    ):
+        if p.exists():
+            p.unlink()
+            removed = True
+            print(f"  Removed: {p}")
+    if not removed:
+        print("  Nothing to remove.")
+
+
 def scan_and_report() -> tuple[dict, str]:
     """Scan transcripts, build report (no date filter - all data), return (report, html)."""
     print("Scanning Claude Code transcripts...")
@@ -71,7 +126,12 @@ def open_native_window(html: str):
         height=800,
         min_size=(800, 600),
     )
-    webview.start()
+    # On Linux we ship the self-contained Qt/QtWebEngine backend; force it so
+    # pywebview does not fall back to the system GTK/WebKit stack.
+    if sys.platform.startswith("linux"):
+        webview.start(gui="qt")
+    else:
+        webview.start()
 
 
 def open_in_browser(html: str):
@@ -84,16 +144,26 @@ def open_in_browser(html: str):
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
-        print(f"Usage: {APP_NAME.lower().replace(' ', '-')}")
+        print(f"Usage: {APP_NAME.lower().replace(' ', '-')} [--install | --uninstall]")
         print("  Opens an interactive dashboard with date filtering in the UI.")
+        print("  --install    Add this app to the Linux application menu (run once).")
+        print("  --uninstall  Remove it from the application menu.")
+        sys.exit(0)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--install":
+        _install_desktop_entry()
+        sys.exit(0)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--uninstall":
+        _uninstall_desktop_entry()
         sys.exit(0)
 
     _report, html = scan_and_report()
 
     try:
         open_native_window(html)
-    except ImportError:
-        print("  pywebview not found, opening in browser...")
+    except Exception as exc:
+        print(f"  Native window unavailable ({exc}); opening in browser...")
         open_in_browser(html)
 
 

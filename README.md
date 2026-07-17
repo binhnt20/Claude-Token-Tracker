@@ -36,6 +36,18 @@ python3 build.py
 
 Full local build + CI/CD walkthrough (Vietnamese): [DEPLOY.md](DEPLOY.md).
 
+### Add to the Linux application menu
+
+The `.AppImage` is a single file, so it won't show up in your app menu by default. Register it once, then launch it from the menu like any other app:
+
+```bash
+chmod +x claude-token-tracker-x86_64.AppImage
+./claude-token-tracker-x86_64.AppImage --install     # adds a menu entry + icon
+./claude-token-tracker-x86_64.AppImage --uninstall   # removes it
+```
+
+If it won't launch from the menu, install FUSE: `sudo apt install libfuse2t64`.
+
 ## CI/CD
 
 Push a tag `v*` (or run the workflow manually) to trigger GitHub Actions builds for macOS, Linux, and Windows. On a tag push, `.dmg`/`.AppImage`/`.exe` artifacts are attached to a GitHub Release automatically.
