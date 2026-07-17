@@ -45,53 +45,83 @@ def _setup_macos_dock():
 DESKTOP_ID = "claude-token-tracker"
 
 
+INSTALL_DIR = Path.home() / ".local" / "lib" / DESKTOP_ID
+APPS_DIR = Path.home() / ".local" / "share" / "applications"
+ICONS_DIR = Path.home() / ".local" / "share" / "icons"
+
+
 def _install_desktop_entry():
-    """Register the AppImage in the Linux application menu (~/.local/share)."""
+    """Install the app into ~/.local so it launches from the menu without FUSE.
+
+    The AppImage is extracted once into ~/.local/lib/<id> and the .desktop
+    entry points at the extracted launcher, so no FUSE mount is needed at
+    click time (and startup is faster than mounting on every launch).
+    """
     appimage = os.environ.get("APPIMAGE")
     if not appimage:
         print("  --install only works when running from the .AppImage.")
         return
 
-    apps_dir = Path.home() / ".local" / "share" / "applications"
-    icons_dir = Path.home() / ".local" / "share" / "icons"
-    apps_dir.mkdir(parents=True, exist_ok=True)
-    icons_dir.mkdir(parents=True, exist_ok=True)
+    import shutil
+    import subprocess
 
-    icon_dest = icons_dir / f"{DESKTOP_ID}.png"
-    icon_src = ASSETS_DIR / "icon.png"
+    APPS_DIR.mkdir(parents=True, exist_ok=True)
+    ICONS_DIR.mkdir(parents=True, exist_ok=True)
+    INSTALL_DIR.parent.mkdir(parents=True, exist_ok=True)
+
+    # Extract the AppImage once (--appimage-extract needs no FUSE).
+    if INSTALL_DIR.exists():
+        shutil.rmtree(INSTALL_DIR)
+    print("  Extracting app (this can take a moment)...")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(
+            [appimage, "--appimage-extract"],
+            cwd=tmp, check=True, stdout=subprocess.DEVNULL,
+        )
+        shutil.move(str(Path(tmp) / "squashfs-root"), str(INSTALL_DIR))
+
+    launcher = INSTALL_DIR / "AppRun"
+    launcher.chmod(0o755)
+
+    icon_dest = ICONS_DIR / f"{DESKTOP_ID}.png"
+    icon_src = INSTALL_DIR / f"{DESKTOP_ID}.png"
     if icon_src.exists():
-        import shutil
         shutil.copy2(icon_src, icon_dest)
     icon_value = str(icon_dest) if icon_dest.exists() else "utilities-system-monitor"
 
-    desktop = apps_dir / f"{DESKTOP_ID}.desktop"
+    desktop = APPS_DIR / f"{DESKTOP_ID}.desktop"
     desktop.write_text(
         "[Desktop Entry]\n"
         f"Name={APP_NAME}\n"
         "Comment=Claude Code token usage dashboard\n"
-        f"Exec={appimage}\n"
+        f"Exec={launcher}\n"
         f"Icon={icon_value}\n"
         "Type=Application\n"
         "Categories=Utility;Development;\n"
         "Terminal=false\n",
         encoding="utf-8",
     )
-    print(f"  Installed: {desktop}")
+    print(f"  Installed to: {INSTALL_DIR}")
+    print(f"  Menu entry:   {desktop}")
     print(f'  Search "{APP_NAME}" in your application menu to launch it.')
-    print("  If it does not launch from the menu, install FUSE: sudo apt install libfuse2t64")
 
 
 def _uninstall_desktop_entry():
-    """Remove the Linux application-menu entry created by --install."""
+    """Remove the app files and menu entry created by --install."""
+    import shutil
     removed = False
     for p in (
-        Path.home() / ".local" / "share" / "applications" / f"{DESKTOP_ID}.desktop",
-        Path.home() / ".local" / "share" / "icons" / f"{DESKTOP_ID}.png",
+        APPS_DIR / f"{DESKTOP_ID}.desktop",
+        ICONS_DIR / f"{DESKTOP_ID}.png",
     ):
         if p.exists():
             p.unlink()
             removed = True
             print(f"  Removed: {p}")
+    if INSTALL_DIR.exists():
+        shutil.rmtree(INSTALL_DIR)
+        removed = True
+        print(f"  Removed: {INSTALL_DIR}")
     if not removed:
         print("  Nothing to remove.")
 
