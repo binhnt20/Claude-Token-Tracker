@@ -112,6 +112,9 @@ th.sorted-desc::after {{ content: ' \\25BC'; font-size: 10px; }}
 td {{ padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }}
 tr:hover td {{ background: var(--surface2); }}
 .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+.note {{ color: var(--text2); font-size: 12px; margin: -20px 0 28px; line-height: 1.5; }}
+.badge {{ background: var(--surface2); color: var(--text2); border-radius: 6px;
+  padding: 2px 8px; font-size: 11px; }}
 
 footer {{ text-align: center; color: var(--text2); font-size: 12px; padding: 16px 0; }}
 /* Flatpickr overrides for dashboard theme */
@@ -156,6 +159,7 @@ span.flatpickr-weekday {{ color: var(--text2) !important; }}
   </div>
 
   <div class="cards" id="cards"></div>
+  <div class="note" id="unpricedNote"></div>
 
   <div class="charts">
     <div class="chart-box">
@@ -176,9 +180,11 @@ span.flatpickr-weekday {{ color: var(--text2) !important; }}
         <th data-key="total" class="num">Total Tokens</th>
         <th data-key="input" class="num">Input</th>
         <th data-key="output" class="num">Output</th>
-        <th data-key="cache_created" class="num">Cache Created</th>
+        <th data-key="cache_5m" class="num">Cache 5m</th>
+        <th data-key="cache_1h" class="num">Cache 1h</th>
         <th data-key="cache_read" class="num">Cache Read</th>
         <th data-key="requests" class="num">Requests</th>
+        <th data-key="cost" class="num">Cost</th>
       </tr></thead>
       <tbody id="projectBody"></tbody>
     </table>
@@ -214,22 +220,16 @@ const txtColor = () => cs.getPropertyValue('--text2').trim();
 const borderColor = () => cs.getPropertyValue('--border').trim();
 
 const modelColors = {{
-  'claude-opus-4-6': '#818cf8',
+  'claude-opus-4-8': '#818cf8',
+  'claude-fable-5': '#a78bfa',
+  'claude-sonnet-5': '#2dd4bf',
   'claude-sonnet-4-6': '#34d399',
-  'claude-haiku-4-5-20251001': '#fb923c',
+  'claude-haiku-4-5': '#fb923c',
 }};
 function getColor(m, i) {{ return modelColors[m] || ['#f472b6','#22d3ee','#60a5fa','#f87171'][i % 4]; }}
 
-// ===================== API Pricing (USD per 1M tokens) =====================
-const PRICING = {{
-  'claude-opus-4-6':            {{ input: 15,   output: 75,  cache_write: 18.75, cache_read: 1.50 }},
-  'claude-sonnet-4-6':          {{ input: 3,    output: 15,  cache_write: 3.75,  cache_read: 0.30 }},
-  'claude-haiku-4-5-20251001':  {{ input: 0.80, output: 4,   cache_write: 1.00,  cache_read: 0.08 }},
-}};
-const DEFAULT_PRICING = {{ input: 3, output: 15, cache_write: 3.75, cache_read: 0.30 }};
+// Costs are computed in pricing.py and arrive on the report. This file never prices anything.
 const USD_TO_VND = 25_850;
-
-function getPrice(model) {{ return PRICING[model] || DEFAULT_PRICING; }}
 
 function fmtUSD(n) {{
   if (n >= 1000) return '$' + (n/1000).toFixed(1) + 'K';
@@ -257,37 +257,49 @@ function filteredDates() {{
 }}
 
 // ===================== Compute filtered stats =====================
+function billableTokens(v) {{
+  return v.input_tokens + v.output_tokens + v.cache_creation_input_tokens;
+}}
+
 function computeStats(dates) {{
-  const summary = {{ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, requests: 0 }};
+  const summary = {{ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0,
+                    cache_creation_5m_tokens: 0, cache_creation_1h_tokens: 0,
+                    cache_read_input_tokens: 0, requests: 0 }};
   const byModel = {{}};
   let costUSD = 0;
   const costByModel = {{}};
+  let unpricedRequests = 0, unpricedTokens = 0;
+  const unpricedModels = new Set();
 
   dates.forEach(d => {{
     const dm = RAW.by_date[d];
     if (!dm) return;
     Object.entries(dm).forEach(([m, v]) => {{
-      if (m === '<synthetic>') return;
       summary.input_tokens += v.input_tokens;
       summary.output_tokens += v.output_tokens;
       summary.cache_creation_input_tokens += v.cache_creation_input_tokens;
+      summary.cache_creation_5m_tokens += v.cache_creation_5m_tokens;
+      summary.cache_creation_1h_tokens += v.cache_creation_1h_tokens;
       summary.cache_read_input_tokens += v.cache_read_input_tokens;
       summary.requests += v.requests;
-      byModel[m] = (byModel[m] || 0) + v.input_tokens + v.output_tokens;
+      byModel[m] = (byModel[m] || 0) + billableTokens(v);
 
-      // Cost calculation (price per 1M tokens)
-      const p = getPrice(m);
-      const mc = (v.input_tokens * p.input
-                + v.output_tokens * p.output
-                + v.cache_creation_input_tokens * p.cache_write
-                + v.cache_read_input_tokens * p.cache_read) / 1e6;
-      costUSD += mc;
-      costByModel[m] = (costByModel[m] || 0) + mc;
+      // v.cost is null when the model has no price table; token counts still apply.
+      if (v.cost) {{
+        costUSD += v.cost.total;
+        costByModel[m] = (costByModel[m] || 0) + v.cost.total;
+      }}
+      if (v.unpriced_requests) {{
+        unpricedRequests += v.unpriced_requests;
+        unpricedTokens += v.unpriced_tokens;
+        unpricedModels.add(m);
+      }}
     }});
   }});
-  summary.total_tokens = summary.input_tokens + summary.output_tokens;
+  summary.total_tokens = billableTokens(summary);
 
-  return {{ summary, byModel, costUSD, costByModel }};
+  return {{ summary, byModel, costUSD, costByModel,
+           unpricedRequests, unpricedTokens, unpricedModels }};
 }}
 
 // ===================== Render functions =====================
@@ -296,7 +308,7 @@ let modelChart = null;
 
 function renderCards(summary, costUSD) {{
   const costVND = costUSD * USD_TO_VND;
-  const costHtml = `<div class="cost">Est. <span>${{fmtUSD(costUSD)}}</span> / <span>${{fmtVND(costVND)}}</span></div>`;
+  const costHtml = `<div class="cost">API-equivalent <span>${{fmtUSD(costUSD)}}</span> / <span>${{fmtVND(costVND)}}</span></div>`;
 
   const cardsData = [
     ['Total Tokens', fmt(summary.total_tokens), fmtFull(summary.total_tokens), costHtml],
@@ -316,17 +328,30 @@ function renderCards(summary, costUSD) {{
   }});
 }}
 
+// The cost figure silently omits these requests otherwise.
+function renderUnpricedNote(stats) {{
+  const note = document.getElementById('unpricedNote');
+  note.textContent = stats.unpricedRequests
+    ? `Cost excludes ${{fmtFull(stats.unpricedRequests)}} requests across `
+      + `${{stats.unpricedModels.size}} model(s) with no price table `
+      + `(${{fmt(stats.unpricedTokens)}} tokens, counted above).`
+    : '';
+}}
+
 function renderDailyChart(dates) {{
-  const modelSet = new Set();
-  dates.forEach(d => Object.keys(RAW.by_date[d] || {{}}).forEach(m => modelSet.add(m)));
-  const models = [...modelSet].filter(m => m !== '<synthetic>');
+  const totals = {{}};
+  dates.forEach(d => Object.entries(RAW.by_date[d] || {{}}).forEach(([m, v]) => {{
+    totals[m] = (totals[m] || 0) + billableTokens(v);
+  }}));
+  // Drop models with nothing to plot (e.g. '<synthetic>', which never reports tokens).
+  const models = Object.keys(totals).filter(m => totals[m] > 0);
 
   const maxBarPx = 80;
   const datasets = models.map((m, i) => ({{
-    label: m.replace('claude-', '').replace('-20251001', ''),
+    label: m.replace('claude-', ''),
     data: dates.map(d => {{
       const v = RAW.by_date[d]?.[m];
-      return v ? v.input_tokens + v.output_tokens : 0;
+      return v ? billableTokens(v) : 0;
     }}),
     backgroundColor: getColor(m, i),
     maxBarThickness: maxBarPx,
@@ -357,15 +382,15 @@ function renderDailyChart(dates) {{
 }}
 
 function renderModelChart(byModel) {{
-  const labels = Object.keys(byModel);
-  const values = Object.values(byModel);
+  const labels = Object.keys(byModel).filter(m => byModel[m] > 0);
+  const values = labels.map(m => byModel[m]);
 
   if (modelChart) {{ modelChart.destroy(); }}
 
   modelChart = new Chart(document.getElementById('modelChart'), {{
     type: 'doughnut',
     data: {{
-      labels: labels.map(m => m.replace('claude-', '').replace('-20251001', '')),
+      labels: labels.map(m => m.replace('claude-', '')),
       datasets: [{{ data: values, backgroundColor: labels.map((m,i) => getColor(m,i)), borderWidth: 0 }}]
     }},
     options: {{
@@ -387,19 +412,39 @@ function buildProjectList(dates) {{
   // RAW doesn't have that granularity, so show all-time project breakdown
   projects = Object.entries(RAW.by_project).map(([name, v]) => ({{
     name,
-    total: v.input_tokens + v.output_tokens,
+    total: billableTokens(v),
     input: v.input_tokens,
     output: v.output_tokens,
-    cache_created: v.cache_creation_input_tokens,
+    cache_5m: v.cache_creation_5m_tokens,
+    cache_1h: v.cache_creation_1h_tokens,
     cache_read: v.cache_read_input_tokens,
     requests: v.requests,
+    cost: v.cost ? v.cost.total : null,
+    unpricedRequests: v.unpriced_requests,
   }}));
+}}
+
+// A project can mix priced and unpriced models, so its cost may cover only part of
+// its requests. Showing a bare dollar figure would imply it covers all of them.
+function costCell(p) {{
+  if (p.cost === null) return '<span class="badge">unpriced</span>';
+  if (!p.unpricedRequests) return fmtUSD(p.cost);
+  const covered = p.requests - p.unpricedRequests;
+  return `${{fmtUSD(p.cost)}} <span class="badge" title="${{fmtFull(p.unpricedRequests)}} of `
+    + `${{fmtFull(p.requests)}} requests have no price table and are excluded from this cost">`
+    + `${{Math.round(covered / p.requests * 100)}}%</span>`;
 }}
 
 function renderTable() {{
   const sorted = [...projects].sort((a, b) => {{
     const av = a[sortKey], bv = b[sortKey];
     if (typeof av === 'string') return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    // Unpriced projects have no cost; keep them at the bottom in both directions
+    // rather than letting (null - number) poison the comparator with NaN.
+    if (av === null || bv === null) {{
+      if (av === bv) return 0;
+      return av === null ? 1 : -1;
+    }}
     return sortAsc ? av - bv : bv - av;
   }});
   const tbody = document.getElementById('projectBody');
@@ -408,9 +453,11 @@ function renderTable() {{
     `<td class="num" title="${{fmtFull(p.total)}}">${{fmt(p.total)}}</td>` +
     `<td class="num" title="${{fmtFull(p.input)}}">${{fmt(p.input)}}</td>` +
     `<td class="num" title="${{fmtFull(p.output)}}">${{fmt(p.output)}}</td>` +
-    `<td class="num" title="${{fmtFull(p.cache_created)}}">${{fmt(p.cache_created)}}</td>` +
+    `<td class="num" title="${{fmtFull(p.cache_5m)}}">${{fmt(p.cache_5m)}}</td>` +
+    `<td class="num" title="${{fmtFull(p.cache_1h)}}">${{fmt(p.cache_1h)}}</td>` +
     `<td class="num" title="${{fmtFull(p.cache_read)}}">${{fmt(p.cache_read)}}</td>` +
-    `<td class="num" title="${{fmtFull(p.requests)}}">${{fmt(p.requests)}}</td></tr>`
+    `<td class="num" title="${{fmtFull(p.requests)}}">${{fmt(p.requests)}}</td>` +
+    `<td class="num">${{costCell(p)}}</td></tr>`
   ).join('');
   document.querySelectorAll('#projectTable th').forEach(th => {{
     th.classList.remove('sorted-asc', 'sorted-desc');
@@ -433,6 +480,7 @@ function renderAll() {{
   const stats = computeStats(dates);
 
   renderCards(stats.summary, stats.costUSD);
+  renderUnpricedNote(stats);
   renderDailyChart(dates);
   renderModelChart(stats.byModel);
   buildProjectList(dates);
