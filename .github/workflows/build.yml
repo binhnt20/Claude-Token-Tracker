@@ -40,7 +40,7 @@ jobs:
           path: dist/*.app
 
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,10 +53,10 @@ jobs:
           sudo apt-get install -y \
             libgirepository1.0-dev libcairo2-dev \
             libwebkit2gtk-4.1-dev gir1.2-webkit2-4.1 \
-            libfuse2
+            libfuse2t64
 
       - name: Install Python dependencies
-        run: pip install pyinstaller pywebview
+        run: pip install pyinstaller pywebview PyGObject pycairo
 
       - name: Download appimagetool
         run: |

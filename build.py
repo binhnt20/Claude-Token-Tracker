@@ -81,6 +81,7 @@ def build_linux():
     print("\n=== Building for Linux (.AppImage) ===\n")
 
     cmd = pyinstaller_base()
+    cmd += ["--collect-all=gi", "--hidden-import=webview.platforms.gtk"]
     cmd.append(SCRIPT)
     run(cmd)
 
