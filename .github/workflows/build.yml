@@ -56,7 +56,7 @@ jobs:
             libfuse2t64
 
       - name: Install Python dependencies
-        run: pip install pyinstaller pywebview PyGObject pycairo
+        run: pip install pyinstaller pywebview "PyGObject<3.50" pycairo
 
       - name: Download appimagetool
         run: |
