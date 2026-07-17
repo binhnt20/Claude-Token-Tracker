@@ -71,7 +71,12 @@ def open_native_window(html: str):
         height=800,
         min_size=(800, 600),
     )
-    webview.start()
+    # On Linux we ship the self-contained Qt/QtWebEngine backend; force it so
+    # pywebview does not fall back to the system GTK/WebKit stack.
+    if sys.platform.startswith("linux"):
+        webview.start(gui="qt")
+    else:
+        webview.start()
 
 
 def open_in_browser(html: str):
@@ -92,8 +97,8 @@ def main():
 
     try:
         open_native_window(html)
-    except ImportError:
-        print("  pywebview not found, opening in browser...")
+    except Exception as exc:
+        print(f"  Native window unavailable ({exc}); opening in browser...")
         open_in_browser(html)
 
 

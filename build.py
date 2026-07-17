@@ -27,11 +27,11 @@ def run(cmd: list[str]):
     subprocess.run(cmd, check=True, cwd=ROOT)
 
 
-def pyinstaller_base() -> list[str]:
+def pyinstaller_base(onefile: bool = True) -> list[str]:
     sep = ";" if sys.platform == "win32" else ":"
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile",
+        "--onefile" if onefile else "--onedir",
         "--windowed",
         "--name", EXE_NAME,
         f"--add-data=assets/chart.min.js{sep}assets",
@@ -80,13 +80,19 @@ def build_macos():
 def build_linux():
     print("\n=== Building for Linux (.AppImage) ===\n")
 
-    cmd = pyinstaller_base()
-    cmd += ["--collect-all=gi", "--hidden-import=webview.platforms.gtk"]
+    # Onedir + Qt/QtWebEngine backend: self-contained (bundles its own Chromium),
+    # avoiding the system GTK/WebKit ABI conflicts of PyInstaller's partial glib.
+    cmd = pyinstaller_base(onefile=False)
+    cmd += [
+        "--collect-all=PySide6",
+        "--collect-all=qtpy",
+        "--hidden-import=webview.platforms.qt",
+    ]
     cmd.append(SCRIPT)
     run(cmd)
 
-    exe_path = ROOT / "dist" / EXE_NAME
-    if not exe_path.exists():
+    onedir = ROOT / "dist" / EXE_NAME
+    if not (onedir / EXE_NAME).exists():
         print("  Build failed.")
         return
 
@@ -99,7 +105,9 @@ def build_linux():
     apprun.write_text(f"""#!/bin/bash
 SELF=$(readlink -f "$0")
 HERE=${{SELF%/*}}
-exec "$HERE/usr/bin/{EXE_NAME}" "$@"
+export PYWEBVIEW_GUI=qt
+export QTWEBENGINE_DISABLE_SANDBOX=1
+exec "$HERE/usr/bin/{EXE_NAME}/{EXE_NAME}" "$@"
 """)
     apprun.chmod(0o755)
 
@@ -112,11 +120,14 @@ Type=Application
 Categories=Utility;Development;
 """)
 
-    # Copy executable
+    # Copy the onedir bundle (exe + _internal) into the AppDir
     usr_bin = appdir / "usr" / "bin"
     usr_bin.mkdir(parents=True, exist_ok=True)
     import shutil
-    shutil.copy2(exe_path, usr_bin / EXE_NAME)
+    dest = usr_bin / EXE_NAME
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(onedir, dest)
 
     # Copy icon
     import shutil as _shutil
@@ -139,7 +150,7 @@ Categories=Utility;Development;
     except FileNotFoundError:
         print("\n  appimagetool not found. Install from: https://appimage.github.io/appimagetool/")
         print(f"  AppDir structure created at: {appdir}")
-        print(f"  Standalone binary available at: {exe_path}")
+        print(f"  Standalone bundle available at: {onedir}")
 
 
 def build_windows():
