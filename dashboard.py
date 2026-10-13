@@ -20,6 +20,43 @@ def _load_asset(name: str) -> str:
     return ""
 
 
+# Dates are local calendar days end to end: the report buckets by local day, so these helpers never go through UTC.
+DATE_HELPERS_JS = """\
+function toDate(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
+function isoDate(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-'
+    + String(d.getDate()).padStart(2, '0');
+}
+function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
+function localToday() { return isoDate(new Date()); }
+"""
+
+# Sums the report's per-day project buckets over the selected dates, so the table follows the date filter.
+PROJECT_HELPERS_JS = """\
+function sumProjects(byDateProject, dates) {
+  const acc = {};
+  dates.forEach(d => {
+    Object.entries(byDateProject[d] || {}).forEach(([name, v]) => {
+      const p = acc[name] || (acc[name] = { name, total: 0, input: 0, output: 0, cache_5m: 0, cache_1h: 0,
+                                             cache_read: 0, requests: 0, cost: null, unpricedRequests: 0 });
+      p.total += v.input_tokens + v.output_tokens + v.cache_creation_input_tokens;
+      p.input += v.input_tokens;
+      p.output += v.output_tokens;
+      p.cache_5m += v.cache_creation_5m_tokens;
+      p.cache_1h += v.cache_creation_1h_tokens;
+      p.cache_read += v.cache_read_input_tokens;
+      p.requests += v.requests;
+      p.unpricedRequests += v.unpriced_requests;
+      // A day whose requests were all unpriced has cost null; it adds nothing, and the project stays null
+      // only when every day in range was unpriced.
+      if (v.cost) p.cost = (p.cost || 0) + v.cost.total;
+    });
+  });
+  return Object.values(acc);
+}
+"""
+
+
 def generate_html(report: dict) -> str:
     """Return a complete self-contained HTML dashboard string."""
     chartjs = _load_asset("chart.min.js")
@@ -173,7 +210,7 @@ span.flatpickr-weekday {{ color: var(--text2) !important; }}
   </div>
 
   <div class="table-box">
-    <h2>Projects</h2>
+    <h2 id="projectTitle">Projects</h2>
     <table id="projectTable">
       <thead><tr>
         <th data-key="name">Project</th>
@@ -207,12 +244,11 @@ function fmt(n) {{
 }}
 function fmtFull(n) {{ return n.toLocaleString(); }}
 
-function toDate(s) {{ return new Date(s + 'T00:00:00'); }}
-function isoDate(d) {{ return d.toISOString().slice(0, 10); }}
-function addDays(d, n) {{ const r = new Date(d); r.setDate(r.getDate() + n); return r; }}
-
+{DATE_HELPERS_JS}
+{PROJECT_HELPERS_JS}
 const allDates = Object.keys(RAW.by_date).sort();
-const todayStr = allDates.length ? allDates[allDates.length - 1] : isoDate(new Date());
+// The real local today, not the last day with data: "Today" must show nothing on a day without usage.
+const todayStr = localToday();
 
 // CSS vars for chart colors
 const cs = getComputedStyle(document.body);
@@ -220,10 +256,15 @@ const txtColor = () => cs.getPropertyValue('--text2').trim();
 const borderColor = () => cs.getPropertyValue('--border').trim();
 
 const modelColors = {{
+  'claude-opus-5-5': '#6366f1',
+  'claude-opus-5': '#8b5cf6',
   'claude-opus-4-8': '#818cf8',
+  'claude-fable-5-1': '#c084fc',
   'claude-fable-5': '#a78bfa',
+  'claude-sonnet-5-5': '#14b8a6',
   'claude-sonnet-5': '#2dd4bf',
   'claude-sonnet-4-6': '#34d399',
+  'claude-haiku-5-5': '#f59e0b',
   'claude-haiku-4-5': '#fb923c',
 }};
 function getColor(m, i) {{ return modelColors[m] || ['#f472b6','#22d3ee','#60a5fa','#f87171'][i % 4]; }}
@@ -403,25 +444,14 @@ function renderModelChart(byModel) {{
   }});
 }}
 
-// --- Project Table (uses RAW.by_project, all-time) ---
+// --- Project Table (RAW.by_date_project over the filtered dates) ---
 let projects = [];
 let sortKey = 'total', sortAsc = false;
 
 function buildProjectList(dates) {{
-  // Rebuild project totals from by_date -> we need per-project-per-date data
-  // RAW doesn't have that granularity, so show all-time project breakdown
-  projects = Object.entries(RAW.by_project).map(([name, v]) => ({{
-    name,
-    total: billableTokens(v),
-    input: v.input_tokens,
-    output: v.output_tokens,
-    cache_5m: v.cache_creation_5m_tokens,
-    cache_1h: v.cache_creation_1h_tokens,
-    cache_read: v.cache_read_input_tokens,
-    requests: v.requests,
-    cost: v.cost ? v.cost.total : null,
-    unpricedRequests: v.unpriced_requests,
-  }}));
+  projects = sumProjects(RAW.by_date_project || {{}}, dates);
+  document.getElementById('projectTitle').textContent =
+    'Projects' + (dates.length < allDates.length ? ` (${{dates.length}} days)` : ' (all time)');
 }}
 
 // A project can mix priced and unpriced models, so its cost may cover only part of
