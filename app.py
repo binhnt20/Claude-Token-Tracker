@@ -6,7 +6,6 @@ Scans local Claude Code transcripts and shows an interactive dashboard in a nati
 from __future__ import annotations
 
 import html as html_lib
-import json
 import os
 import secrets
 import shutil
@@ -16,7 +15,8 @@ import time
 import webbrowser
 from pathlib import Path
 
-from track_tokens import TranscriptsNotFound, collect_all_entries, build_report, print_summary, OUTPUT_FILE
+import track_tokens
+from track_tokens import TranscriptsNotFound, build_report, print_summary, save_report
 from dashboard import generate_html, ASSETS_DIR
 
 APP_NAME = "Claude Token Tracker"
@@ -133,15 +133,12 @@ def _uninstall_desktop_entry():
 def scan_and_report() -> tuple[dict, str]:
     """Scan transcripts, build report (no date filter - all data), return (report, html)."""
     print("Scanning Claude Code transcripts...")
-    all_entries, project_totals = collect_all_entries()
+    all_entries, project_totals = track_tokens.collect_all_entries()
     print(f"Found {len(all_entries):,} responses across {len(project_totals)} projects")
 
     report = build_report(all_entries, project_totals, date_filter=None)
 
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-
+    save_report(report)
     print_summary(report)
     return report, generate_html(report)
 

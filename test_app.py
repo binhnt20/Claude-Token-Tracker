@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import app
+import track_tokens
 from track_tokens import TranscriptsNotFound
 
 
@@ -136,6 +137,22 @@ class TestNoTranscripts(unittest.TestCase):
         self.assertIn("/home/u/.claude/projects", html)
         self.assertIn("/home/u/&lt;odd&gt;/projects", html)
         self.assertIn("CLAUDE_CONFIG_DIR", html)
+
+
+class TestReportFile(unittest.TestCase):
+    def test_scan_survives_a_report_file_it_cannot_write(self):
+        """An AppImage runs from a read-only mount: a failed token_usage.json write must not stop the window."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        blocker = Path(tmp.name) / "not-a-folder"
+        blocker.write_text("", encoding="utf-8")
+        err = io.StringIO()
+        with mock.patch.object(track_tokens, "collect_all_entries", return_value=([], {})), \
+                mock.patch.object(track_tokens, "OUTPUT_FILE", blocker / "token_usage.json"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            _report, html = app.scan_and_report()
+        self.assertIn("<!DOCTYPE html>", html)
+        self.assertIn("could not save", err.getvalue())
 
 
 if __name__ == "__main__":

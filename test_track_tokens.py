@@ -26,6 +26,7 @@ from track_tokens import (
     entry_date,
     parse_transcript,
     project_display_name,
+    report_path,
     utc_date,
 )
 
@@ -282,6 +283,23 @@ class TestCliArguments(unittest.TestCase):
             self.assertIn(arg, err)
             collect.assert_not_called()
 
+    def test_a_report_file_that_cannot_be_written_is_a_warning(self):
+        """A read-only install folder must not cost the user the summary."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        blocker = Path(tmp.name) / "not-a-folder"
+        blocker.write_text("", encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(track_tokens, "collect_all_entries", return_value=([], {})), \
+                mock.patch.object(track_tokens, "OUTPUT_FILE", blocker / "token_usage.json"), \
+                mock.patch.object(track_tokens.sys, "argv", ["track_tokens.py"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            track_tokens.main()
+        self.assertIn("TOTAL:", out.getvalue())
+        self.assertNotIn("Report saved to", out.getvalue())
+        self.assertIn("could not save", err.getvalue())
+        self.assertIn(str(blocker / "token_usage.json"), err.getvalue())
+
     def test_a_real_date_filters_on_the_zero_padded_day(self):
         for arg, day in (("2026-10-10", "2026-10-10"), ("2026-1-5", "2026-01-05")):
             code, out, _err, _collect, report = self.run_cli(arg)
@@ -519,6 +537,29 @@ class TestSources(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertIn(f"skipping {folder}", err.getvalue())
         self.assertIn(f"skipping {file_}", err.getvalue())
+
+
+class TestReportPath(unittest.TestCase):
+    """Where token_usage.json goes: next to the script from source, the user's data folder in a packaged app."""
+
+    HERE = Path("/src/ctt")
+    HOME = Path("/home/u")
+
+    def path(self, frozen, platform, env=None):
+        return report_path(frozen=frozen, platform=platform, env=env or {}, home=self.HOME, here=self.HERE)
+
+    def test_source_run_keeps_the_file_next_to_the_script(self):
+        for platform in ("linux", "darwin", "win32"):
+            self.assertEqual(self.path(False, platform), self.HERE / "token_usage.json")
+
+    def test_packaged_app_writes_where_the_user_can(self):
+        """Next to the code is a read-only AppImage mount, a signed .app bundle or a temp folder that vanishes."""
+        name = Path("claude-token-tracker") / "token_usage.json"
+        self.assertEqual(self.path(True, "linux"), self.HOME / ".local" / "share" / name)
+        self.assertEqual(self.path(True, "linux", {"XDG_DATA_HOME": "/data"}), Path("/data") / name)
+        self.assertEqual(self.path(True, "darwin"), self.HOME / "Library" / "Application Support" / name)
+        self.assertEqual(self.path(True, "win32", {"LOCALAPPDATA": "/appdata"}), Path("/appdata") / name)
+        self.assertEqual(self.path(True, "win32"), self.HOME / "AppData" / "Local" / name)
 
 
 if __name__ == "__main__":

@@ -7,10 +7,11 @@ Scans Claude Code transcripts (sources.py lists the folders) and aggregates toke
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
@@ -19,7 +20,24 @@ from sources import iter_transcripts, transcript_candidates, transcript_roots, w
 
 # Kept for callers that import it; collect_all_entries reads every root from sources.transcript_roots().
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
-OUTPUT_FILE = Path(__file__).parent / "token_usage.json"
+
+
+def report_path(frozen: bool, platform: str, env: Mapping[str, str], home: Path, here: Path) -> Path:
+    """Where token_usage.json goes. From source: next to this script, as always. A packaged app's code sits on a
+    read-only AppImage mount, inside a signed .app bundle or in a temp folder that vanishes, so it writes to the
+    user's data folder instead."""
+    if not frozen:
+        return here / "token_usage.json"
+    if platform == "win32":
+        base = Path(env["LOCALAPPDATA"]) if env.get("LOCALAPPDATA") else home / "AppData" / "Local"
+    elif platform == "darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(env["XDG_DATA_HOME"]) if env.get("XDG_DATA_HOME") else home / ".local" / "share"
+    return base / "claude-token-tracker" / "token_usage.json"
+
+
+OUTPUT_FILE = report_path(getattr(sys, "frozen", False), sys.platform, os.environ, Path.home(), Path(__file__).parent)
 
 TOKEN_KEYS = (
     "input_tokens",
@@ -469,6 +487,19 @@ def print_summary(report: dict):
     print("=" * 60)
 
 
+def save_report(report: dict) -> Path | None:
+    """Write token_usage.json; a folder that cannot be written costs the file, never the summary or the window."""
+    try:
+        OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        print(f"claude-token-tracker: could not save the report to {OUTPUT_FILE} ({exc.strerror or exc})",
+              file=sys.stderr)
+        return None
+    return OUTPUT_FILE
+
+
 USAGE = """Usage: python3 track_tokens.py [today | yesterday | YYYY-MM-DD]
   No argument: all-time report. Days are this computer's local days.
   Prints a summary and writes token_usage.json next to this script."""
@@ -502,14 +533,10 @@ def main():
     print(f"Found {len(all_entries):,} assistant responses across {len(project_totals)} projects\n")
 
     report = build_report(all_entries, project_totals, date_filter)
-
-    # Save to JSON
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-
+    saved = save_report(report)
     print_summary(report)
-    print(f"\n  Report saved to: {OUTPUT_FILE}")
+    if saved:
+        print(f"\n  Report saved to: {saved}")
 
 
 if __name__ == "__main__":
