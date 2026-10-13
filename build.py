@@ -40,6 +40,7 @@ def pyinstaller_base(onefile: bool = True) -> list[str]:
         f"--add-data=assets/flatpickr-dark.css{sep}assets",
         f"--add-data=assets/icon.png{sep}assets",
         "--hidden-import=track_tokens",
+        "--hidden-import=sources",
         "--hidden-import=dashboard",
     ]
     return cmd

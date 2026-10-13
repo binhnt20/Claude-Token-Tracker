@@ -13,6 +13,7 @@ from unittest import mock
 
 import pricing
 import track_tokens
+from sources import iter_transcripts, transcript_roots
 from track_tokens import collect_all_entries, dedupe, parse_transcript
 
 
@@ -143,13 +144,66 @@ class TestCollectAllEntries(TranscriptCase):
     def test_project_totals_count_each_call_once(self):
         self.write([assistant_line(output=8), assistant_line(output=471)], name="a.jsonl", folder="-work-repo")
         self.write([assistant_line(output=471)], name="b.jsonl", folder="-work-repo")
-        with mock.patch.object(track_tokens, "CLAUDE_DIR", Path(self.tmp.name)):
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[Path(self.tmp.name)]):
             entries, projects = collect_all_entries()
         self.assertEqual(len(entries), 1)
         (stats,) = projects.values()
         self.assertEqual(stats["requests"], 1)
         self.assertEqual(stats["output_tokens"], 471)
         self.assertIn("web_search", stats["cost"])
+
+
+class TestSources(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+
+    def mkdirs(self, *parts):
+        for part in parts:
+            (self.base / part).mkdir(parents=True, exist_ok=True)
+        return [self.base / part for part in parts]
+
+    def test_config_dir_list(self):
+        a, b = self.mkdirs("a/projects", "b/projects")
+        env = {"CLAUDE_CONFIG_DIR": f"{self.base / 'a'},{self.base / 'b'}"}
+        self.assertEqual(transcript_roots(env=env, home=self.base / "home"), [a, b])
+
+    def test_config_dir_replaces_the_defaults(self):
+        (only,) = self.mkdirs("a/projects")
+        self.mkdirs("home/.claude/projects")
+        env = {"CLAUDE_CONFIG_DIR": str(self.base / "a")}
+        self.assertEqual(transcript_roots(env=env, home=self.base / "home"), [only])
+
+    def test_default_reads_both_home_dirs(self):
+        legacy, xdg = self.mkdirs("home/.claude/projects", "home/.config/claude/projects")
+        self.assertEqual(transcript_roots(env={}, home=self.base / "home"), [legacy, xdg])
+
+    def test_missing_dirs_are_skipped(self):
+        (legacy,) = self.mkdirs("home/.claude/projects")
+        self.assertEqual(transcript_roots(env={}, home=self.base / "home"), [legacy])
+        self.assertEqual(transcript_roots(env={}, home=self.base / "nobody"), [])
+
+    def test_symlinked_duplicate_listed_once(self):
+        (legacy,) = self.mkdirs("home/.claude/projects")
+        (self.base / "home/.config").mkdir()
+        try:
+            (self.base / "home/.config/claude").symlink_to(self.base / "home/.claude", target_is_directory=True)
+        except OSError:
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(transcript_roots(env={}, home=self.base / "home"), [legacy])
+
+    def test_iter_transcripts_any_depth(self):
+        root = self.base / "projects"
+        session = root / "proj" / "s.jsonl"
+        subagent = root / "proj" / "s" / "subagents" / "agent-x.jsonl"
+        for path in (session, subagent):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        (root / "stray.jsonl").write_text("", encoding="utf-8")
+        found = list(iter_transcripts(root))
+        self.assertEqual(sorted(found), [("proj", subagent), ("proj", session)])
+        self.assertEqual(found, sorted(found))
 
 
 if __name__ == "__main__":

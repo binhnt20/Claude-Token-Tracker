@@ -13,7 +13,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pricing import COST_PARTS, cost_usd, normalize_model
+from sources import iter_transcripts, transcript_roots
 
+# Kept for callers that import it; collect_all_entries reads every root from sources.transcript_roots().
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 OUTPUT_FILE = Path(__file__).parent / "token_usage.json"
 
@@ -244,19 +246,14 @@ def collect_all_entries() -> tuple[list[dict], dict]:
     all_entries = []
     project_totals = defaultdict(new_stats)
 
-    if not CLAUDE_DIR.exists():
+    roots = transcript_roots()
+    if not roots:
         print(f"Claude directory not found: {CLAUDE_DIR}")
         sys.exit(1)
 
-    for project_dir in CLAUDE_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-
-        project_name = extract_project_name(project_dir.name)
-        transcripts = list(project_dir.glob("*.jsonl"))
-        transcripts += project_dir.glob("*/subagents/*.jsonl")
-
-        for jsonl_file in transcripts:
+    for root in roots:
+        for dir_name, jsonl_file in iter_transcripts(root):
+            project_name = extract_project_name(dir_name)
             for record in parse_transcript(jsonl_file):
                 record["project"] = project_name
                 all_entries.append(record)
