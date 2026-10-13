@@ -29,6 +29,24 @@ function isoDate(d) {
 }
 function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
 function localToday() { return isoDate(new Date()); }
+function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+// Calendar days from..to inclusive; rounding absorbs the 23- and 25-hour days of a DST change.
+function rangeDays(from, to) { return Math.round((toDate(to) - toDate(from)) / 86400000) + 1; }
+// [from, to] for a quick button (0 = all time, at most 180 days of data); null leaves that end open. today is an
+// argument so a page left open past midnight follows the clock.
+function rangeFor(days, allDates, today) {
+  if (days === 0) return [allDates.length > 180 ? allDates[allDates.length - 180] : null, null];
+  if (days === 1) return [today, today];
+  if (days === 2) { const y = isoDate(addDays(toDate(today), -1)); return [y, y]; }
+  return [isoDate(addDays(toDate(today), -(Math.min(days, 180) - 1))), null];
+}
+// " (N days)" counts the calendar days in the range, not the days with usage; an open start is the first day with
+// data and an open end is today.
+function rangeLabel(from, to, allDates, today) {
+  if (!from && !to) return ' (all time)';
+  const end = to || today;
+  return ' (' + plural(rangeDays(from || allDates[0] || end, end), 'day') + ')';
+}
 """
 
 # Sums the report's per-day project buckets over the selected dates, so the table follows the date filter.
@@ -54,7 +72,30 @@ function sumProjects(byDateProject, dates) {
   });
   return Object.values(acc);
 }
+// Share of a project's requests that the cost covers. Rounded down: 99.6% must not read as "100%".
+function pricedPercent(p) { return Math.floor((p.requests - p.unpricedRequests) / p.requests * 100); }
+// Project names are folder paths and may hold any character.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
 """
+
+
+def _page_bucket(stats: dict) -> dict:
+    return {k: v for k, v in stats.items() if not k.endswith("_display")}
+
+
+def page_data_json(report: dict) -> str:
+    """The part of the report the page reads, as a script-safe JS literal.
+
+    The display strings and all-time tables only made the page bigger. Every '<' is escaped, so no project name can
+    end the <script> element early.
+    """
+    data = {"generated_at": report.get("generated_at")}
+    for key in ("by_date", "by_date_project"):
+        data[key] = {day: {name: _page_bucket(stats) for name, stats in buckets.items()}
+                     for day, buckets in report.get(key, {}).items()}
+    return json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
 
 
 def generate_html(report: dict) -> str:
@@ -63,7 +104,7 @@ def generate_html(report: dict) -> str:
     flatpickr_css = _load_asset("flatpickr.min.css")
     flatpickr_dark_css = _load_asset("flatpickr-dark.css")
     flatpickr_js = _load_asset("flatpickr.min.js")
-    data_json = json.dumps(report, ensure_ascii=False)
+    data_json = page_data_json(report)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -247,8 +288,6 @@ function fmtFull(n) {{ return n.toLocaleString(); }}
 {DATE_HELPERS_JS}
 {PROJECT_HELPERS_JS}
 const allDates = Object.keys(RAW.by_date).sort();
-// The real local today, not the last day with data: "Today" must show nothing on a day without usage.
-const todayStr = localToday();
 
 // CSS vars for chart colors
 const cs = getComputedStyle(document.body);
@@ -384,7 +423,7 @@ function renderDailyChart(dates) {{
   dates.forEach(d => Object.entries(RAW.by_date[d] || {{}}).forEach(([m, v]) => {{
     totals[m] = (totals[m] || 0) + billableTokens(v);
   }}));
-  // Drop models with nothing to plot (e.g. '<synthetic>', which never reports tokens).
+  // Drop models with nothing to plot in this range.
   const models = Object.keys(totals).filter(m => totals[m] > 0);
 
   const maxBarPx = 80;
@@ -403,7 +442,7 @@ function renderDailyChart(dates) {{
   if (dailyChart) {{ dailyChart.destroy(); }}
 
   document.getElementById('chartTitle').textContent =
-    'Daily Token Usage' + (dates.length < allDates.length ? ` (${{dates.length}} days)` : ' (all time)');
+    'Daily Token Usage' + rangeLabel(filterFrom, filterTo, allDates, localToday());
 
   dailyChart = new Chart(document.getElementById('dailyChart'), {{
     type: 'bar',
@@ -451,7 +490,7 @@ let sortKey = 'total', sortAsc = false;
 function buildProjectList(dates) {{
   projects = sumProjects(RAW.by_date_project || {{}}, dates);
   document.getElementById('projectTitle').textContent =
-    'Projects' + (dates.length < allDates.length ? ` (${{dates.length}} days)` : ' (all time)');
+    'Projects' + rangeLabel(filterFrom, filterTo, allDates, localToday());
 }}
 
 // A project can mix priced and unpriced models, so its cost may cover only part of
@@ -459,10 +498,9 @@ function buildProjectList(dates) {{
 function costCell(p) {{
   if (p.cost === null) return '<span class="badge">unpriced</span>';
   if (!p.unpricedRequests) return fmtUSD(p.cost);
-  const covered = p.requests - p.unpricedRequests;
   return `${{fmtUSD(p.cost)}} <span class="badge" title="${{fmtFull(p.unpricedRequests)}} of `
     + `${{fmtFull(p.requests)}} requests have no price table and are excluded from this cost">`
-    + `${{Math.round(covered / p.requests * 100)}}%</span>`;
+    + `${{pricedPercent(p)}}%</span>`;
 }}
 
 function renderTable() {{
@@ -479,7 +517,7 @@ function renderTable() {{
   }});
   const tbody = document.getElementById('projectBody');
   tbody.innerHTML = sorted.map(p =>
-    `<tr><td>${{p.name}}</td>` +
+    `<tr><td>${{escapeHtml(p.name)}}</td>` +
     `<td class="num" title="${{fmtFull(p.total)}}">${{fmt(p.total)}}</td>` +
     `<td class="num" title="${{fmtFull(p.input)}}">${{fmt(p.input)}}</td>` +
     `<td class="num" title="${{fmtFull(p.output)}}">${{fmt(p.output)}}</td>` +
@@ -522,35 +560,13 @@ function renderAll() {{
   else if (filterFrom) filterText = 'from ' + filterFrom;
   else if (filterTo) filterText = 'to ' + filterTo;
   else filterText = 'All time';
-  document.getElementById('subtitle').textContent =
-    filterText + ' | ' + dates.length + ' days | Generated: ' + RAW.generated_at.slice(0, 19) + 'Z';
+  document.getElementById('subtitle').textContent = filterText + ' | ' + plural(dates.length, 'day')
+    + ' with usage | Generated: ' + RAW.generated_at.slice(0, 19) + 'Z';
 }}
 
 // ===================== Filter bar logic =====================
 function setRange(days) {{
-  if (days === 0) {{
-    // All time (max 180 days)
-    if (allDates.length > 180) {{
-      filterFrom = allDates[allDates.length - 180];
-    }} else {{
-      filterFrom = null;
-    }}
-    filterTo = null;
-  }} else if (days === 1) {{
-    // Today
-    filterFrom = todayStr;
-    filterTo = todayStr;
-  }} else if (days === 2) {{
-    // Yesterday
-    const y = isoDate(addDays(toDate(todayStr), -1));
-    filterFrom = y;
-    filterTo = y;
-  }} else {{
-    // Last N days
-    const capDays = Math.min(days, 180);
-    filterFrom = isoDate(addDays(toDate(todayStr), -(capDays - 1)));
-    filterTo = null;
-  }}
+  [filterFrom, filterTo] = rangeFor(days, allDates, localToday());
   renderAll();
 }}
 
@@ -581,7 +597,7 @@ const rangeHint = document.getElementById('rangeHint');
 const fpOpts = {{
   dateFormat: 'Y-m-d',
   minDate: allDates.length ? allDates[0] : undefined,
-  maxDate: todayStr,
+  maxDate: localToday(),
   disableMobile: true,
   theme: 'dark',
 }};
@@ -594,9 +610,12 @@ btnCustom.addEventListener('click', () => {{
   if (isVisible) {{
     dateRangeEl.classList.remove('visible');
   }} else {{
+    const today = localToday();
+    fpFrom.set('maxDate', today);
+    fpTo.set('maxDate', today);
     dateRangeEl.classList.add('visible');
-    fpFrom.setDate(filterFrom || (allDates.length ? allDates[0] : todayStr), false);
-    fpTo.setDate(filterTo || todayStr, false);
+    fpFrom.setDate(filterFrom || (allDates.length ? allDates[0] : today), false);
+    fpTo.setDate(filterTo || today, false);
   }}
   document.querySelectorAll('.filter-bar button').forEach(b => b.classList.remove('active'));
   btnCustom.classList.add('active');
