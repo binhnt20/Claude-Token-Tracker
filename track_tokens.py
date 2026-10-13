@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pricing import cost_usd, normalize_model
+from pricing import COST_PARTS, cost_usd, normalize_model
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 OUTPUT_FILE = Path(__file__).parent / "token_usage.json"
@@ -56,14 +56,8 @@ def new_stats() -> dict:
     """Return an empty stats bucket."""
     stats = {k: 0 for k in TOKEN_KEYS}
     stats["requests"] = 0
-    stats["cost"] = {
-        "input": 0.0,
-        "output": 0.0,
-        "cache_write_5m": 0.0,
-        "cache_write_1h": 0.0,
-        "cache_read": 0.0,
-        "total": 0.0,
-    }
+    stats["cost"] = {part: 0.0 for part in COST_PARTS}
+    stats["cost"]["total"] = 0.0
     # Counts, not a flag: a bucket keyed by project mixes models, so "is this unpriced?"
     # has no single answer. Counting lets a bucket be partially priced.
     stats["unpriced_requests"] = 0
@@ -99,12 +93,39 @@ def accumulate(stats: dict, entry: dict) -> None:
         stats["unpriced_tokens"] += total_tokens(entry)
 
 
+def record_key(entry: dict, message: dict) -> str | None:
+    """Identity of the API call behind a transcript line, or None when the line carries no id."""
+    message_id = message.get("id")
+    if message_id:
+        if entry.get("requestId"):
+            return f"{message_id}:{entry['requestId']}"
+        if entry.get("sessionId"):
+            return f"{message_id}:{entry['sessionId']}"
+    if entry.get("uuid"):
+        return f"uuid:{entry['uuid']}"
+    return None
+
+
+def dedupe(records: list[dict]) -> list[dict]:
+    """Keep one record per API call: the line with the most output tokens, the later one on a tie.
+
+    Claude Code writes one line per content block of a response, each repeating the call's usage, and the first
+    line's output count is still partial. Resumed sessions also copy earlier lines into a new file.
+    """
+    kept = {}
+    for record in records:
+        current = kept.get(record["key"])
+        if current is None or record["output_tokens"] >= current["output_tokens"]:
+            kept[record["key"]] = record
+    return list(kept.values())
+
+
 def parse_transcript(filepath: Path) -> list[dict]:
-    """Parse a JSONL transcript file into token usage entries, each carrying its own cost."""
+    """Parse a JSONL transcript file into one record per usage line, each carrying its own cost."""
     entries = []
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
+            for lineno, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
@@ -134,14 +155,13 @@ def parse_transcript(filepath: Path) -> list[dict]:
                 # Canonical name: snapshot suffixes price identically, so folding them here
                 # keeps one series per model everywhere downstream. The key can be present
                 # and null, which "unknown" as a get() default would not catch.
-                model = normalize_model(message.get("model") or "unknown")
+                price_model = normalize_model(message.get("model") or "unknown")
                 session_id = entry.get("sessionId", "unknown")
-
-                # Fast mode is billed at a different rate we do not model. Renaming the
-                # model makes it miss the price table, so it reports as unpriced rather
-                # than silently billing at standard rates.
-                if usage.get("speed") == "fast":
-                    model = f"{model} (fast)"
+                speed = usage.get("speed")
+                # Fast mode is its own series on the charts; pricing applies its multiplier.
+                model = f"{price_model} (fast)" if speed == "fast" else price_model
+                server_tools = usage.get("server_tool_use")
+                web_searches = server_tools.get("web_search_requests", 0) if isinstance(server_tools, dict) else 0
 
                 cache_creation = usage.get("cache_creation")
                 unmodelled_cache = False
@@ -164,9 +184,16 @@ def parse_transcript(filepath: Path) -> list[dict]:
                     cache_1h = 0
 
                 record = {
+                    "key": record_key(entry, message) or f"line:{filepath}:{lineno}",
                     "timestamp": timestamp,
                     "model": model,
+                    "price_model": price_model,
                     "session_id": session_id,
+                    "cwd": entry.get("cwd"),
+                    "is_sidechain": bool(entry.get("isSidechain")),
+                    "speed": speed,
+                    "inference_geo": usage.get("inference_geo"),
+                    "web_search_requests": web_searches or 0,
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "cache_creation_input_tokens": cache_write_total,
@@ -175,9 +202,10 @@ def parse_transcript(filepath: Path) -> list[dict]:
                     "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
                 }
 
+                # Price windows follow the UTC date of the call.
                 date = entry_date(timestamp)
                 if date and not unmodelled_cache:
-                    record["cost"] = cost_usd(record, model, date)
+                    record["cost"] = cost_usd(record, price_model, date)
                 else:
                     record["cost"] = None
                 entries.append(record)
@@ -229,11 +257,14 @@ def collect_all_entries() -> tuple[list[dict], dict]:
         transcripts += project_dir.glob("*/subagents/*.jsonl")
 
         for jsonl_file in transcripts:
-            entries = parse_transcript(jsonl_file)
-            all_entries.extend(entries)
+            for record in parse_transcript(jsonl_file):
+                record["project"] = project_name
+                all_entries.append(record)
 
-            for e in entries:
-                accumulate(project_totals[project_name], e)
+    # De-duplicate across every file before any total: copies of a call can sit in different files.
+    all_entries = dedupe(all_entries)
+    for record in all_entries:
+        accumulate(project_totals[record["project"]], record)
 
     return all_entries, dict(project_totals)
 
@@ -321,6 +352,7 @@ def print_summary(report: dict):
     print(f"    Cache write 5m:  {c['cache_write_5m']:>12,.2f} USD")
     print(f"    Cache write 1h:  {c['cache_write_1h']:>12,.2f} USD")
     print(f"    Cache read:      {c['cache_read']:>12,.2f} USD")
+    print(f"    Web search:      {c['web_search']:>12,.2f} USD")
     print(f"    TOTAL:           {c['total']:>12,.2f} USD")
 
     if s["unpriced_requests"]:

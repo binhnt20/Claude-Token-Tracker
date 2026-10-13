@@ -409,8 +409,13 @@ class TestParseTranscript(unittest.TestCase):
         self.assertEqual(e["model"], "unknown")
         self.assertIsNone(e["cost"])
 
-    def test_fast_mode_is_unpriced(self):
+    def test_fast_mode_is_priced_at_its_multiplier(self):
         e = self._write({"input_tokens": 1_000_000, "speed": "fast"})[0]
+        self.assertAlmostEqual(e["cost"]["input"], 10)
+        self.assertIn("fast", e["model"])
+
+    def test_fast_mode_without_verified_multiplier_is_unpriced(self):
+        e = self._write({"input_tokens": 1_000_000, "speed": "fast"}, model="claude-opus-4-6")[0]
         self.assertIsNone(e["cost"])
         self.assertIn("fast", e["model"])
 
