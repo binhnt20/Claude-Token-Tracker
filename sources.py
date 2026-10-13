@@ -10,6 +10,11 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 
+def warn_skipping(path: Path | str, exc: OSError) -> None:
+    """One stderr line for a folder or file that cannot be read: the total leaves it out, so the user must know."""
+    print(f"claude-token-tracker: skipping {path} ({exc.strerror or exc})", file=sys.stderr)
+
+
 def _is_dir(path: Path) -> bool:
     """Like Path.is_dir(), but a folder that exists and cannot be reached is skipped with a warning, not raised."""
     try:
@@ -17,7 +22,7 @@ def _is_dir(path: Path) -> bool:
     except (FileNotFoundError, NotADirectoryError):
         return False
     except OSError as exc:
-        print(f"claude-token-tracker: skipping {path} ({exc.strerror or exc})", file=sys.stderr)
+        warn_skipping(path, exc)
         return False
 
 
@@ -51,8 +56,19 @@ def transcript_roots(env: Mapping[str, str] | None = None, home: Path | None = N
 
 
 def iter_transcripts(root: Path) -> Iterator[tuple[str, Path]]:
-    """Yield (project folder name, path) for every *.jsonl at any depth under each project folder, sorted."""
-    for project_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        for path in sorted(project_dir.rglob("*.jsonl")):
+    """Yield (project folder name, path) for every *.jsonl at any depth under each project folder, sorted.
+
+    A folder that cannot be listed is skipped with a warning; rglob would drop it without a word.
+    """
+    try:
+        project_dirs = sorted(p for p in root.iterdir() if _is_dir(p))
+    except OSError as exc:
+        warn_skipping(root, exc)
+        return
+    for project_dir in project_dirs:
+        paths = []
+        for folder, _subdirs, files in os.walk(project_dir, onerror=lambda exc: warn_skipping(exc.filename, exc)):
+            paths += [Path(folder) / name for name in files if name.endswith(".jsonl")]
+        for path in sorted(paths):
             if path.is_file():
                 yield project_dir.name, path

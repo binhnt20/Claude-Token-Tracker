@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 from pricing import COST_PARTS, cost_usd, normalize_model
-from sources import iter_transcripts, transcript_candidates, transcript_roots
+from sources import iter_transcripts, transcript_candidates, transcript_roots, warn_skipping
 
 # Kept for callers that import it; collect_all_entries reads every root from sources.transcript_roots().
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
@@ -246,8 +246,8 @@ def parse_transcript(filepath: Path) -> list[dict]:
                 else:
                     record["cost"] = None
                 entries.append(record)
-    except OSError:
-        pass
+    except OSError as exc:
+        warn_skipping(filepath, exc)
     return entries
 
 

@@ -481,6 +481,45 @@ class TestSources(unittest.TestCase):
         self.assertEqual(sorted(found), [("proj", subagent), ("proj", session)])
         self.assertEqual(found, sorted(found))
 
+    def lock(self, path):
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o700)
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "needs POSIX permissions and a non-root user")
+    def test_unreadable_projects_folder_does_not_stop_the_other_roots(self):
+        """A projects folder another user owns (mode 700) passes stat() but not listing; the scan goes on."""
+        locked, readable = self.mkdirs("a/projects", "b/projects/-work-repo")
+        (readable / "s.jsonl").write_text(json.dumps(assistant_line()) + "\n", encoding="utf-8")
+        self.lock(locked)
+        err = io.StringIO()
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[locked, readable.parent]), \
+                contextlib.redirect_stderr(err):
+            entries, _projects = collect_all_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertIn(f"skipping {locked}", err.getvalue())
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "needs POSIX permissions and a non-root user")
+    def test_unreadable_project_folder_and_file_are_named(self):
+        """A total that silently leaves out a folder or a file cannot be trusted; each one skipped gets a line."""
+        root = self.base / "projects"
+        folder = root / "-work-locked"
+        file_ = root / "-work-repo" / "locked.jsonl"
+        kept = root / "-work-repo" / "ok.jsonl"
+        for path in (folder / "s.jsonl", file_, kept):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(assistant_line(msg_id=path.name)) + "\n", encoding="utf-8")
+        self.lock(folder)
+        self.lock(file_)
+        err = io.StringIO()
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[root]), \
+                contextlib.redirect_stderr(err):
+            entries, _projects = collect_all_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertIn(f"skipping {folder}", err.getvalue())
+        self.assertIn(f"skipping {file_}", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
