@@ -14,7 +14,9 @@ import secrets
 import shutil
 import sys
 import tempfile
+import threading
 import time
+import traceback
 import webbrowser
 from pathlib import Path
 from typing import Callable, Mapping
@@ -169,6 +171,46 @@ def not_found_html(exc: TranscriptsNotFound) -> str:
             "then open this app again.</p></body></html>")
 
 
+def error_html(exc: Exception) -> str:
+    """Shown in the window when building the dashboard failed, instead of 'Scanning' forever."""
+    return ("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Claude Code Token Usage</title>"
+            "<style>body{font-family:system-ui,sans-serif;margin:40px;line-height:1.6}</style></head><body>"
+            "<h1>Could not build the dashboard</h1>"
+            f"<pre>{html_lib.escape(f'{type(exc).__name__}: {exc}')}</pre>"
+            "<p>Run <code>python3 track_tokens.py</code> in a terminal to see the full error.</p></body></html>")
+
+
+# Same colours as the dashboard, so the switch to it does not flash.
+SCANNING_HTML = ("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Claude Code Token Usage</title>"
+                 "<style>body{font-family:system-ui,sans-serif;margin:40px;line-height:1.6;background:#0f172a;"
+                 "color:#f1f5f9}@media (prefers-color-scheme: light){body{background:#f1f5f9;color:#1e293b}}</style>"
+                 "</head><body><h1>Scanning Claude Code transcripts\u2026</h1>"
+                 "<p>The dashboard opens here when the scan is done. A first scan of a long history can take a minute."
+                 "</p></body></html>")
+
+
+def scan_page() -> str:
+    """The dashboard, or a page that says where transcripts were looked for."""
+    try:
+        _report, html = scan_and_report()
+    except TranscriptsNotFound as exc:
+        print(exc, file=sys.stderr)
+        html = not_found_html(exc)
+    return html
+
+
+def once(make: Callable[[], str]) -> Callable[[], str]:
+    """make, run at most once: a fallback after the window already scanned reuses the page."""
+    lock, result = threading.Lock(), []
+
+    def call() -> str:
+        with lock:
+            if not result:
+                result.append(make())
+            return result[0]
+    return call
+
+
 PAGE_FOLDER_PREFIX = "claude-token-tracker-"
 STALE_PAGE_SECONDS = 24 * 60 * 60
 
@@ -218,13 +260,22 @@ def quiet_backend_tracebacks() -> None:
     logging.getLogger("pywebview").addFilter(_ONE_LINE_BACKEND_ERRORS)
 
 
-def open_native_window(html: str):
-    """Open dashboard in a native OS window using pywebview.
+def _write_page(folder: Path, html: str) -> Path:
+    page = folder / f"{secrets.token_urlsafe(16)}.html"
+    page.write_text(html, encoding="utf-8")
+    return page
 
-    The page is loaded from a file, not passed as html=: that goes through Qt setHtml / WebView2 NavigateToString,
+
+def open_native_window(make_html: Callable[[], str]):
+    """Open the dashboard in a native OS window using pywebview.
+
+    The window opens at once on a "Scanning" page and make_html runs behind it, so a long first scan is not a minute
+    with nothing on screen. It runs on a daemon thread: closing the window mid-scan ends the app.
+
+    Pages are loaded from files, not passed as html=: that goes through Qt setHtml / WebView2 NavigateToString,
     which show a blank window once the page passes 2 MB. pywebview serves a plain path's folder on 127.0.0.1, so the
-    page gets a private folder of its own, removed when the window closes, and a random name, so another local user
-    cannot read it from the server by guessing.
+    pages get a private folder of their own, removed when the window closes, and random names, so another local user
+    cannot read them from the server by guessing.
     """
     import webview
 
@@ -237,22 +288,33 @@ def open_native_window(html: str):
     _remove_stale_page_folders()
     folder = Path(tempfile.mkdtemp(prefix=PAGE_FOLDER_PREFIX))
     try:
-        page = folder / f"{secrets.token_urlsafe(16)}.html"
-        page.write_text(html, encoding="utf-8")
-        webview.create_window(
+        window = webview.create_window(
             APP_NAME,
-            url=str(page),
+            url=str(_write_page(folder, SCANNING_HTML)),
             width=1200,
             height=800,
             min_size=(800, 600),
         )
+
+        def show_page():
+            try:
+                html = make_html()
+            except Exception as exc:
+                traceback.print_exc()
+                html = error_html(exc)
+            if not window.events.closed.is_set():
+                window.load_url(str(_write_page(folder, html)))
+
+        def scan_behind_the_window():
+            threading.Thread(target=show_page, name="scan", daemon=True).start()
+
         quiet_backend_tracebacks()
         # On Linux we ship the self-contained Qt/QtWebEngine backend; force it so
         # pywebview does not fall back to the system GTK/WebKit stack.
         if sys.platform.startswith("linux"):
-            webview.start(gui="qt")
+            webview.start(scan_behind_the_window, gui="qt")
         else:
-            webview.start()
+            webview.start(scan_behind_the_window)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 
@@ -285,17 +347,12 @@ def main():
         _uninstall_desktop_entry()
         sys.exit(0)
 
+    page = once(scan_page)
     try:
-        _report, html = scan_and_report()
-    except TranscriptsNotFound as exc:
-        print(exc, file=sys.stderr)
-        html = not_found_html(exc)
-
-    try:
-        open_native_window(html)
+        open_native_window(page)
     except Exception as exc:
         print(f"  Native window unavailable ({exc}); opening in browser...")
-        open_in_browser(html)
+        open_in_browser(page())
 
 
 if __name__ == "__main__":

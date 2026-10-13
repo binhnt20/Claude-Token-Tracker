@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -29,20 +30,41 @@ except (ImportError, ValueError):
     Gio = GLib = None
 
 
+class FakeWindow:
+    def __init__(self):
+        self.events = types.SimpleNamespace(closed=threading.Event())
+        self.loaded_urls, self.pages, self.folder_files = [], [], []
+        self.loaded = threading.Event()
+
+    def load_url(self, url):
+        # Read now: the folder goes when the window closes.
+        self.loaded_urls.append(url)
+        self.pages.append(Path(url).read_text(encoding="utf-8"))
+        self.folder_files = sorted(p.name for p in Path(url).parent.iterdir())
+        self.loaded.set()
+
+
 class FakeWebview(types.ModuleType):
-    """Records create_window and, at start(), what a real window would load."""
+    """Records create_window and, at start(), what a real window would show: its first page, then the one func loads."""
 
     def __init__(self):
         super().__init__("webview")
         self.windows = []
-        self.loaded = None
+        self.window = None
+        self.first = self.loaded = None
 
     def create_window(self, title, **kwargs):
         self.windows.append(kwargs)
+        self.window = FakeWindow()
+        return self.window
 
-    def start(self, **kwargs):
-        url = self.windows[-1].get("url")
-        self.loaded = Path(url).read_text(encoding="utf-8") if url else None
+    def start(self, func=None, **kwargs):
+        self.first = Path(self.windows[-1]["url"]).read_text(encoding="utf-8")
+        if func:
+            func()
+            if not self.window.loaded.wait(10):
+                raise AssertionError("the window never got its page")
+            self.loaded = self.window.pages[-1]
 
 
 def allow_native_window(test: unittest.TestCase) -> None:
@@ -59,7 +81,7 @@ class TestNativeWindow(unittest.TestCase):
     def open(self, html: str) -> FakeWebview:
         fake = FakeWebview()
         with mock.patch.dict(sys.modules, {"webview": fake}):
-            app.open_native_window(html)
+            app.open_native_window(lambda: html)
         return fake
 
     def test_page_is_loaded_from_a_file_not_passed_inline(self):
@@ -72,41 +94,102 @@ class TestNativeWindow(unittest.TestCase):
 
     def test_url_is_a_local_path_pywebview_serves(self):
         """A plain path makes pywebview serve its folder on 127.0.0.1; file:// is not loaded the same everywhere."""
-        (window,) = self.open("<p>hi</p>").windows
-        self.assertNotIn("://", window["url"])
-        self.assertTrue(Path(window["url"]).is_absolute())
+        fake = self.open("<p>hi</p>")
+        first, (dashboard,) = fake.windows[0]["url"], fake.window.loaded_urls
+        for url in (first, dashboard):
+            self.assertNotIn("://", url)
+            self.assertTrue(Path(url).is_absolute())
+        self.assertEqual(Path(first).parent, Path(dashboard).parent)
 
-    def test_page_folder_holds_only_the_page_and_is_removed(self):
-        """pywebview serves the whole folder, so it must be a private folder of its own."""
-        fake = FakeWebview()
+    def test_window_opens_on_a_scanning_page_before_the_scan_ends(self):
+        """The packaged app showed nothing for 25 s (90 s cold) while it scanned; a second double-click scanned again."""
+        scanned = threading.Event()
         seen = {}
 
-        def start(**kwargs):
-            page = Path(fake.windows[-1]["url"])
-            seen["folder"], seen["files"] = page.parent, [p.name for p in page.parent.iterdir()]
+        def make_html():
+            scanned.set()
+            return "<p>dashboard</p>"
+
+        fake = FakeWebview()
+        real_start = fake.start
+
+        def start(func=None, **kwargs):
+            seen["scanned_before_window"] = scanned.is_set()
+            real_start(func, **kwargs)
 
         fake.start = start
         with mock.patch.dict(sys.modules, {"webview": fake}):
-            app.open_native_window("<p>hi</p>")
-        self.assertEqual(len(seen["files"]), 1)
-        self.assertFalse(seen["folder"].exists())
+            app.open_native_window(make_html)
+        self.assertFalse(seen["scanned_before_window"])
+        self.assertIn("Scanning", fake.first)
+        self.assertEqual(fake.loaded, "<p>dashboard</p>")
+
+    def test_a_failed_scan_says_why_in_the_window(self):
+        """Otherwise the window would say 'Scanning' forever."""
+        def make_html():
+            raise ValueError("bad <line>")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            fake = self.open_with(make_html)
+        self.assertIn("ValueError: bad &lt;line&gt;", fake.loaded)
+        self.assertIn("Traceback", err.getvalue())
+
+    def test_closing_the_window_mid_scan_does_not_wait_for_the_scan(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        seen = {}
+
+        def make_html():
+            seen["daemon"] = threading.current_thread().daemon
+            release.wait(10)
+            return "<p>late</p>"
+
+        fake = FakeWebview()
+
+        def start(func=None, **kwargs):
+            func()
+            fake.window.events.closed.set()
+
+        fake.start = start
+        began = time.monotonic()
+        with mock.patch.dict(sys.modules, {"webview": fake}):
+            app.open_native_window(make_html)
+        self.assertLess(time.monotonic() - began, 5)
+        for _ in range(100):
+            if "daemon" in seen:
+                break
+            time.sleep(0.02)
+        self.assertTrue(seen["daemon"])
+
+    def open_with(self, make_html) -> FakeWebview:
+        fake = FakeWebview()
+        with mock.patch.dict(sys.modules, {"webview": fake}):
+            app.open_native_window(make_html)
+        return fake
+
+    def test_page_folder_holds_only_the_pages_and_is_removed(self):
+        """pywebview serves the whole folder, so it must be a private folder of its own."""
+        fake = self.open("<p>hi</p>")
+        self.assertEqual(len(fake.window.folder_files), 2)
+        self.assertFalse(Path(fake.window.loaded_urls[0]).parent.exists())
 
     def test_folder_is_removed_when_the_window_fails(self):
         fake = FakeWebview()
         seen = {}
 
-        def start(**kwargs):
+        def start(func=None, **kwargs):
             seen["folder"] = Path(fake.windows[-1]["url"]).parent
             raise RuntimeError("no display")
 
         fake.start = start
         with mock.patch.dict(sys.modules, {"webview": fake}), self.assertRaises(RuntimeError):
-            app.open_native_window("<p>hi</p>")
+            app.open_native_window(lambda: "<p>hi</p>")
         self.assertFalse(seen["folder"].exists())
 
     def test_page_name_cannot_be_guessed(self):
         """The page is served on 127.0.0.1 while the window is open; another local user must not find it by name."""
-        names = {Path(self.open("<p>hi</p>").windows[0]["url"]).name for _ in range(2)}
+        names = {Path(self.open("<p>hi</p>").window.loaded_urls[0]).name for _ in range(2)}
         self.assertEqual(len(names), 2)
         for name in names:
             self.assertTrue(name.endswith(".html"))
@@ -144,7 +227,7 @@ class TestNativeWindowBlocker(unittest.TestCase):
                 mock.patch.object(app, "native_window_blocker", return_value="no display"), \
                 mock.patch.object(app.tempfile, "mkdtemp") as mkdtemp, \
                 self.assertRaisesRegex(RuntimeError, "no display"):
-            app.open_native_window("<p>hi</p>")
+            app.open_native_window(lambda: "<p>hi</p>")
         mkdtemp.assert_not_called()
         self.assertEqual(fake.windows, [])
 
@@ -181,7 +264,7 @@ class TestBackendLog(unittest.TestCase):
         allow_native_window(self)
         with mock.patch.dict(sys.modules, {"webview": FakeWebview()}), \
                 mock.patch.object(app, "quiet_backend_tracebacks") as quiet:
-            app.open_native_window("<p>hi</p>")
+            app.open_native_window(lambda: "<p>hi</p>")
         quiet.assert_called_once_with()
 
 
@@ -211,7 +294,7 @@ class TestStalePages(unittest.TestCase):
         unrelated = self.folder("someone-else-old", age_hours=48)
         fake = FakeWebview()
         with mock.patch.dict(sys.modules, {"webview": fake}):
-            app.open_native_window("<p>hi</p>")
+            app.open_native_window(lambda: "<p>hi</p>")
         self.assertFalse(old.exists())
         self.assertTrue(running.exists())
         self.assertTrue(unrelated.exists())
@@ -267,10 +350,27 @@ class TestNoTranscripts(unittest.TestCase):
                 mock.patch.object(app.sys, "argv", ["app.py"]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             app.main()
-        (html,), _ = window.call_args
+            (make_html,), _ = window.call_args
+            html = make_html()
         self.assertIn("/home/u/.claude/projects", html)
         self.assertIn("/home/u/&lt;odd&gt;/projects", html)
         self.assertIn("CLAUDE_CONFIG_DIR", html)
+
+
+class TestFallbackScan(unittest.TestCase):
+    def test_the_browser_gets_the_page_the_window_already_scanned(self):
+        """A window that dies after its scan must not cost a second scan of the whole history."""
+        def window(make_html):
+            make_html()
+            raise RuntimeError("window died")
+
+        with mock.patch.object(app, "scan_and_report", return_value=({}, "<p>dashboard</p>")) as scan, \
+                mock.patch.object(app, "open_native_window", side_effect=window), \
+                mock.patch.object(app, "open_in_browser") as browser, \
+                mock.patch.object(app.sys, "argv", ["app.py"]), contextlib.redirect_stdout(io.StringIO()):
+            app.main()
+        scan.assert_called_once_with()
+        browser.assert_called_once_with("<p>dashboard</p>")
 
 
 class TestConsole(unittest.TestCase):
