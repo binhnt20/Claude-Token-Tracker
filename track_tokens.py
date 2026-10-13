@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path, PurePath
 
 from pricing import COST_PARTS, cost_usd, normalize_model
-from sources import iter_transcripts, transcript_candidates, transcript_roots, warn_skipping
+from sources import data_dir, iter_transcripts, transcript_candidates, transcript_roots, warn_skipping
 
 # Kept for callers that import it; collect_all_entries reads every root from sources.transcript_roots().
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
@@ -28,13 +28,7 @@ def report_path(frozen: bool, platform: str, env: Mapping[str, str], home: Path,
     user's data folder instead."""
     if not frozen:
         return here / "token_usage.json"
-    if platform == "win32":
-        base = Path(env["LOCALAPPDATA"]) if env.get("LOCALAPPDATA") else home / "AppData" / "Local"
-    elif platform == "darwin":
-        base = home / "Library" / "Application Support"
-    else:
-        base = Path(env["XDG_DATA_HOME"]) if env.get("XDG_DATA_HOME") else home / ".local" / "share"
-    return base / "claude-token-tracker" / "token_usage.json"
+    return data_dir(platform, env, home) / "token_usage.json"
 
 
 OUTPUT_FILE = report_path(getattr(sys, "frozen", False), sys.platform, os.environ, Path.home(), Path(__file__).parent)
