@@ -5,10 +5,14 @@
 ```
 claude-token-tracker/
 ├── app.py                  # Entry point chính (+ --install/--uninstall trên Linux)
-├── track_tokens.py         # Thu thập dữ liệu từ ~/.claude/projects/
+├── track_tokens.py         # Đọc transcript, gộp token + chi phí theo ngày, model, project
+├── sources.py              # Tìm thư mục transcript: ~/.claude/projects, ~/.config/claude/projects, hoặc CLAUDE_CONFIG_DIR
 ├── pricing.py              # Bảng giá + tính chi phí (API-equivalent)
-├── test_pricing.py         # Test cho pricing.py (unittest)
 ├── dashboard.py            # Sinh HTML dashboard với Chart.js + flatpickr
+├── test_pricing.py         # Test cho pricing.py (unittest)
+├── test_track_tokens.py    # Test đọc transcript, khử trùng lặp, ngày địa phương, tên project
+├── test_dashboard.py       # Test trang dashboard (helper JS chạy bằng node nếu máy có)
+├── test_app.py             # Test cửa sổ app (giả lập pywebview)
 ├── build.py                # Script build cho từng OS
 ├── gen_icon.py             # Tạo icon (chỉ chạy trên macOS)
 ├── assets/
@@ -34,6 +38,14 @@ claude-token-tracker/
 ```bash
 pip install pyinstaller pywebview
 ```
+
+### Chạy test trước khi build
+
+```bash
+python -m unittest
+```
+
+Test chỉ dùng thư viện chuẩn. Máy có `node` thì chạy thêm test cho helper JS của dashboard; không có thì các test đó tự bỏ qua.
 
 ### macOS
 

@@ -63,6 +63,7 @@ dashboard.py        # Self-contained HTML dashboard generator (Chart.js + flatpi
 test_pricing.py     # Tests for pricing.py (stdlib unittest)
 test_track_tokens.py  # Tests for parsing, de-duplication, sources, dates and projects
 test_dashboard.py   # Tests for the dashboard page (date helpers run under node when installed)
+test_app.py         # Tests for the desktop window (pywebview stubbed)
 build.py            # PyInstaller build script (macOS/Linux/Windows)
 gen_icon.py         # App icon generator (macOS-only, uses AppKit)
 assets/             # Chart.js, flatpickr, icons — inlined/bundled into the app
@@ -71,7 +72,7 @@ token_usage.json    # Generated report (gitignored)
 
 ## How numbers are counted
 
-- **Each API call counts once.** Claude Code writes one transcript line per content block of a response, each repeating the call's usage, and a resumed session copies earlier lines into a new file. Lines are grouped by message id + request id across all files, keeping the line with the final output count.
+- **Each API call counts once.** Claude Code writes one transcript line per content block of a response, each repeating the call's usage, and a resumed session copies earlier lines into a new file. Lines are grouped by message id + request id across all files, keeping the line with the final output count. Lines Claude Code makes up itself (model `<synthetic>`, no API call behind them) are not counted.
 - **Cost is API-equivalent** — what usage would cost at published list prices, not a subscription bill. Each call is priced at the rate in effect on its UTC date (`pricing.py` keeps dated rows and their sources), including cache writes (5 min / 1 h), cache reads, Haiku 5.5 prompt-length tiers, fast mode (2× on Opus 5.5, Opus 5 and Opus 4.8), US-only inference (1.1× on Claude 4.6 and later) and web search ($10 per 1,000 searches).
 - **Nothing is guessed.** An unknown model, fast mode on a model without a published multiplier, or an unknown cache tier is reported as unpriced: its tokens are counted, its cost is not.
 - **Days are your local days** (the computer's time zone), in the CLI, the report and the dashboard. Projects are named after the working directory recorded in their transcripts, and the project table follows the date filter.
