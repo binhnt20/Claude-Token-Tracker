@@ -6,6 +6,7 @@ The JS helpers run under node when it is installed; the rest checks the generate
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -15,7 +16,8 @@ import unittest
 from unittest import mock
 
 import dashboard
-from dashboard import DATE_HELPERS_JS, PROJECT_HELPERS_JS, generate_html
+from dashboard import (DATE_HELPERS_JS, FALLBACK_COLORS, FORMAT_HELPERS_JS, MODEL_COLORS, PROJECT_HELPERS_JS,
+                       generate_html)
 
 NODE = shutil.which("node")
 
@@ -33,6 +35,18 @@ def bucket(tokens: int, requests: int, cost: float | None, unpriced: int = 0) ->
 
 MINIMAL_REPORT = {"summary": {}, "by_date": {}, "by_project": {}, "by_date_project": {},
                   "generated_at": "2026-10-13T00:00:00+00:00"}
+
+
+def delta_e(hex_a: str, hex_b: str) -> float:
+    """CIE76 distance between two sRGB colours; about 2 is barely visible, 20 is clearly a different colour."""
+    def lab(hex_color):
+        rgb = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        r, g, b = (c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb)
+        xyz = ((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047, 0.2126 * r + 0.7152 * g + 0.0722 * b,
+               (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883)
+        fx, fy, fz = (t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116 for t in xyz)
+        return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+    return sum((p - q) ** 2 for p, q in zip(lab(hex_a), lab(hex_b))) ** 0.5
 
 
 def embedded_data(html: str) -> dict:
@@ -76,12 +90,59 @@ class TestDateHelpers(unittest.TestCase):
             const few = ['2026-10-01', '2026-10-12'];
             assert.deepStrictEqual(rangeFor(1, few, '2026-10-13'), ['2026-10-13', '2026-10-13']);
             assert.deepStrictEqual(rangeFor(2, few, '2026-10-13'), ['2026-10-12', '2026-10-12']);
-            assert.deepStrictEqual(rangeFor(7, few, '2026-10-13'), ['2026-10-07', null]);
+            assert.deepStrictEqual(rangeFor(7, few, '2026-10-13'), ['2026-10-07', '2026-10-13']);
+            assert.deepStrictEqual(rangeFor(30, few, '2026-10-13'), ['2026-09-14', '2026-10-13']);
             assert.deepStrictEqual(rangeFor(1, few, '2026-10-14'), ['2026-10-14', '2026-10-14']);
             assert.deepStrictEqual(rangeFor(0, few, '2026-10-13'), [null, null]);
-            const many = Array.from({ length: 200 }, (_, i) => isoDate(addDays(toDate('2026-01-01'), i)));
-            assert.deepStrictEqual(rangeFor(0, many, '2026-10-13'), [many[20], null]);
-            assert.deepStrictEqual(rangeFor(365, many, '2026-10-13'), ['2026-04-17', null]);
+            assert.deepStrictEqual(rangeFor(365, few, '2026-10-13'), ['2025-10-14', '2026-10-13']);
+        """, tz="Asia/Ho_Chi_Minh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_all_time_is_every_day_with_data(self):
+        """'All time' was capped at the last 180 days with data, under a label that said all time (UBU-9)."""
+        result = run_node(DATE_HELPERS_JS + """
+            const assert = require('assert');
+            const many = Array.from({ length: 200 }, (_, i) => isoDate(addDays(toDate('2026-03-25'), i)));
+            const [from, to] = rangeFor(0, many, '2026-10-13');
+            assert.deepStrictEqual(datesInRange(many, from, to), many);
+        """, tz="Asia/Ho_Chi_Minh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_last_n_days_end_today(self):
+        """A transcript stamped in the future (a wrong clock) is not part of 'Last 7 days' (WIN-3)."""
+        result = run_node(DATE_HELPERS_JS + """
+            const assert = require('assert');
+            const data = ['2026-10-06', '2026-10-07', '2026-10-13', '2026-10-22'];
+            const [from, to] = rangeFor(7, data, '2026-10-13');
+            assert.deepStrictEqual(datesInRange(data, from, to), ['2026-10-07', '2026-10-13']);
+            assert.deepStrictEqual(datesInRange(data, ...rangeFor(30, data, '2026-10-13')),
+                                   ['2026-10-06', '2026-10-07', '2026-10-13']);
+            assert.deepStrictEqual(datesInRange(data, ...rangeFor(0, data, '2026-10-13')), data);
+        """, tz="Asia/Ho_Chi_Minh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_calendar_days_fill_the_gaps(self):
+        """The daily chart drew only days with usage, so 09-30 sat next to 10-03 (UBU-12)."""
+        result = run_node(DATE_HELPERS_JS + """
+            const assert = require('assert');
+            assert.deepStrictEqual(calendarDays('2026-09-29', '2026-10-02'),
+                                   ['2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02']);
+            assert.deepStrictEqual(calendarDays('2026-10-13', '2026-10-13'), ['2026-10-13']);
+            assert.deepStrictEqual(calendarDays('2026-10-14', '2026-10-13'), []);
+            // The days a DST change shortens or lengthens are still one day each.
+            assert.deepStrictEqual(calendarDays('2026-03-07', '2026-03-09'), ['2026-03-07', '2026-03-08', '2026-03-09']);
+            assert.deepStrictEqual(calendarDays('2026-10-31', '2026-11-02'), ['2026-10-31', '2026-11-01', '2026-11-02']);
+        """, tz="America/Los_Angeles")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_chart_days_cover_the_whole_range(self):
+        result = run_node(DATE_HELPERS_JS + """
+            const assert = require('assert');
+            const data = ['2026-09-30', '2026-10-03'];
+            assert.deepStrictEqual(chartDays(null, null, data), ['2026-09-30', '2026-10-01', '2026-10-02', '2026-10-03']);
+            assert.strictEqual(chartDays('2026-10-07', '2026-10-13', data).length, 7);
+            assert.deepStrictEqual(chartDays('2026-10-13', '2026-10-13', []), ['2026-10-13']);
+            assert.deepStrictEqual(chartDays(null, null, []), []);
         """, tz="Asia/Ho_Chi_Minh")
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -99,6 +160,32 @@ class TestDateHelpers(unittest.TestCase):
             assert.strictEqual(plural(0, 'day'), '0 days');
             assert.strictEqual(plural(2, 'day'), '2 days');
         """, tz="America/Los_Angeles")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_money_format(self):
+        """A zero cost read '$0.0000' (UBU-12); small non-zero costs keep their digits."""
+        result = run_node(DATE_HELPERS_JS + FORMAT_HELPERS_JS + """
+            const assert = require('assert');
+            assert.strictEqual(fmtUSD(0), '$0.00');
+            assert.strictEqual(fmtUSD(0.0042), '$0.0042');
+            assert.strictEqual(fmtUSD(0.5), '$0.50');
+            assert.strictEqual(fmtUSD(211.6139), '$211.61');
+            assert.strictEqual(fmtUSD(17257.75), '$17.3K');
+            assert.strictEqual(fmtVND(0), '0 VND');
+        """)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unpriced_note_counts_in_words(self):
+        """'Cost excludes 1 requests across 1 model(s)' read as a template, not a sentence."""
+        result = run_node(DATE_HELPERS_JS + FORMAT_HELPERS_JS + """
+            const assert = require('assert');
+            assert.strictEqual(unpricedNote({ unpricedRequests: 0, unpricedModels: new Set(), unpricedTokens: 0 }), '');
+            assert.strictEqual(unpricedNote({ unpricedRequests: 1, unpricedModels: new Set(['m']), unpricedTokens: 900 }),
+                'Cost excludes 1 request from 1 model with no price table (900 tokens, counted above).');
+            assert.strictEqual(
+                unpricedNote({ unpricedRequests: 1234, unpricedModels: new Set(['m', 'n']), unpricedTokens: 5600 }),
+                'Cost excludes 1,234 requests from 2 models with no price table (5.6K tokens, counted above).');
+        """)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_escape_html(self):
@@ -163,6 +250,7 @@ class TestGeneratedHtml(unittest.TestCase):
 
     def test_helpers_are_inlined(self):
         self.assertIn(DATE_HELPERS_JS, self.html)
+        self.assertIn(FORMAT_HELPERS_JS, self.html)
         self.assertIn(PROJECT_HELPERS_JS, self.html)
 
     def test_today_is_not_last_data_day(self):
@@ -211,7 +299,21 @@ class TestGeneratedHtml(unittest.TestCase):
     def test_current_models_have_colors(self):
         for model in ("claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-haiku-5-5",
                       "claude-fable-5-1"):
-            self.assertIn(f"'{model}':", self.html)
+            self.assertIn(model, MODEL_COLORS)
+        self.assertIn(f"const modelColors = {json.dumps(MODEL_COLORS)};", self.html)
+        self.assertIn(f"const fallbackColors = {json.dumps(FALLBACK_COLORS)};", self.html)
+
+    def test_no_two_chart_colors_look_alike(self):
+        """sonnet-5 and sonnet-5-5 were 10 apart in CIE Lab, too close to tell apart in a stacked bar (UBU-12)."""
+        colors = {**MODEL_COLORS, **{f"fallback-{i}": c for i, c in enumerate(FALLBACK_COLORS)}}
+        for (a, ca), (b, cb) in itertools.combinations(colors.items(), 2):
+            with self.subTest(a=a, b=b):
+                self.assertGreaterEqual(delta_e(ca, cb), 20)
+
+    def test_custom_button_clears_a_stale_error(self):
+        """'Start must be before end' stayed next to a valid range after Last 7 days, then Custom (UBU-8)."""
+        handler = re.search(r"btnCustom\.addEventListener\('click', \(\) => \{(.*?)\n\}\);", self.html, re.S)
+        self.assertIn("clearRangeHint();", handler.group(1))
 
 
 if __name__ == "__main__":

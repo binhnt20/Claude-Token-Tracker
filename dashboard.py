@@ -32,13 +32,28 @@ function localToday() { return isoDate(new Date()); }
 function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
 // Calendar days from..to inclusive; rounding absorbs the 23- and 25-hour days of a DST change.
 function rangeDays(from, to) { return Math.round((toDate(to) - toDate(from)) / 86400000) + 1; }
-// [from, to] for a quick button (0 = all time, at most 180 days of data); null leaves that end open. today is an
-// argument so a page left open past midnight follows the clock.
+// [from, to] for a quick button; 0 = all time, [null, null], every day with data. The others end today, so a day
+// stamped in the future by a wrong clock stays out of "Last 7 days". today is an argument so a page left open past
+// midnight follows the clock.
 function rangeFor(days, allDates, today) {
-  if (days === 0) return [allDates.length > 180 ? allDates[allDates.length - 180] : null, null];
-  if (days === 1) return [today, today];
+  if (days === 0) return [null, null];
   if (days === 2) { const y = isoDate(addDays(toDate(today), -1)); return [y, y]; }
-  return [isoDate(addDays(toDate(today), -(Math.min(days, 180) - 1))), null];
+  return [isoDate(addDays(toDate(today), -(days - 1))), today];
+}
+// The dates of allDates inside [from, to]; null leaves that end open.
+function datesInRange(allDates, from, to) {
+  return allDates.filter(d => (!from || d >= from) && (!to || d <= to));
+}
+// Every calendar day from..to inclusive, so the chart keeps the days without usage.
+function calendarDays(from, to) {
+  const days = [];
+  for (let d = toDate(from); isoDate(d) <= to; d = addDays(d, 1)) days.push(isoDate(d));
+  return days;
+}
+// The chart's x axis: the range, with an open end resolved to the first or last day with data.
+function chartDays(from, to, allDates) {
+  const first = from || allDates[0], last = to || allDates[allDates.length - 1];
+  return first && last ? calendarDays(first, last) : [];
 }
 // " (N days)" counts the calendar days in the range, not the days with usage; an open start is the first day with
 // data and an open end is today.
@@ -48,6 +63,50 @@ function rangeLabel(from, to, allDates, today) {
   return ' (' + plural(rangeDays(from || allDates[0] || end, end), 'day') + ')';
 }
 """
+
+FORMAT_HELPERS_JS = """\
+function fmt(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return String(n);
+}
+function fmtFull(n) { return n.toLocaleString(); }
+// Four decimals only for a cost too small to show in cents; zero is $0.00.
+function fmtUSD(n) {
+  if (n >= 1000) return '$' + (n/1000).toFixed(1) + 'K';
+  if (n >= 0.01 || n === 0) return '$' + n.toFixed(2);
+  return '$' + n.toFixed(4);
+}
+function fmtVND(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B VND';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M VND';
+  if (n >= 1e3) return (n/1e3).toFixed(0) + 'K VND';
+  return Math.round(n) + ' VND';
+}
+// The cost figure silently omits these requests otherwise.
+function unpricedNote(stats) {
+  if (!stats.unpricedRequests) return '';
+  const n = stats.unpricedRequests, m = stats.unpricedModels.size;
+  return 'Cost excludes ' + fmtFull(n) + ' request' + (n === 1 ? '' : 's') + ' from ' + plural(m, 'model')
+    + ' with no price table (' + fmt(stats.unpricedTokens) + ' tokens, counted above).';
+}
+"""
+
+# Model colours stay at least 20 apart in CIE Lab, so two models side by side in a stacked bar never look alike.
+MODEL_COLORS = {
+    "claude-opus-5-5": "#6366f1",
+    "claude-opus-5": "#a78bfa",
+    "claude-opus-4-8": "#3b82f6",
+    "claude-fable-5-1": "#e879f9",
+    "claude-fable-5": "#9333ea",
+    "claude-sonnet-5-5": "#14b8a6",
+    "claude-sonnet-5": "#a3e635",
+    "claude-sonnet-4-6": "#16a34a",
+    "claude-haiku-5-5": "#facc15",
+    "claude-haiku-4-5": "#ea580c",
+}
+FALLBACK_COLORS = ["#f472b6", "#22d3ee", "#60a5fa", "#f87171"]
 
 # Sums the report's per-day project buckets over the selected dates, so the table follows the date filter.
 PROJECT_HELPERS_JS = """\
@@ -278,15 +337,8 @@ span.flatpickr-weekday {{ color: var(--text2) !important; }}
 const RAW = {data_json};
 
 // ===================== Helpers =====================
-function fmt(n) {{
-  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
-  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
-  return String(n);
-}}
-function fmtFull(n) {{ return n.toLocaleString(); }}
-
 {DATE_HELPERS_JS}
+{FORMAT_HELPERS_JS}
 {PROJECT_HELPERS_JS}
 const allDates = Object.keys(RAW.by_date).sort();
 
@@ -295,47 +347,18 @@ const cs = getComputedStyle(document.body);
 const txtColor = () => cs.getPropertyValue('--text2').trim();
 const borderColor = () => cs.getPropertyValue('--border').trim();
 
-const modelColors = {{
-  'claude-opus-5-5': '#6366f1',
-  'claude-opus-5': '#8b5cf6',
-  'claude-opus-4-8': '#818cf8',
-  'claude-fable-5-1': '#c084fc',
-  'claude-fable-5': '#a78bfa',
-  'claude-sonnet-5-5': '#14b8a6',
-  'claude-sonnet-5': '#2dd4bf',
-  'claude-sonnet-4-6': '#34d399',
-  'claude-haiku-5-5': '#f59e0b',
-  'claude-haiku-4-5': '#fb923c',
-}};
-function getColor(m, i) {{ return modelColors[m] || ['#f472b6','#22d3ee','#60a5fa','#f87171'][i % 4]; }}
+const modelColors = {json.dumps(MODEL_COLORS)};
+const fallbackColors = {json.dumps(FALLBACK_COLORS)};
+function getColor(m, i) {{ return modelColors[m] || fallbackColors[i % fallbackColors.length]; }}
 
 // Costs are computed in pricing.py and arrive on the report. This file never prices anything.
 const USD_TO_VND = 25_850;
-
-function fmtUSD(n) {{
-  if (n >= 1000) return '$' + (n/1000).toFixed(1) + 'K';
-  if (n >= 1) return '$' + n.toFixed(2);
-  if (n >= 0.01) return '$' + n.toFixed(2);
-  return '$' + n.toFixed(4);
-}}
-function fmtVND(n) {{
-  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B VND';
-  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M VND';
-  if (n >= 1e3) return (n/1e3).toFixed(0) + 'K VND';
-  return Math.round(n) + ' VND';
-}}
 
 // ===================== Date filter state =====================
 let filterFrom = null; // null = no lower bound
 let filterTo = null;   // null = no upper bound
 
-function filteredDates() {{
-  return allDates.filter(d => {{
-    if (filterFrom && d < filterFrom) return false;
-    if (filterTo && d > filterTo) return false;
-    return true;
-  }});
-}}
+function filteredDates() {{ return datesInRange(allDates, filterFrom, filterTo); }}
 
 // ===================== Compute filtered stats =====================
 function billableTokens(v) {{
@@ -409,14 +432,8 @@ function renderCards(summary, costUSD) {{
   }});
 }}
 
-// The cost figure silently omits these requests otherwise.
 function renderUnpricedNote(stats) {{
-  const note = document.getElementById('unpricedNote');
-  note.textContent = stats.unpricedRequests
-    ? `Cost excludes ${{fmtFull(stats.unpricedRequests)}} requests across `
-      + `${{stats.unpricedModels.size}} model(s) with no price table `
-      + `(${{fmt(stats.unpricedTokens)}} tokens, counted above).`
-    : '';
+  document.getElementById('unpricedNote').textContent = unpricedNote(stats);
 }}
 
 function renderDailyChart(dates) {{
@@ -428,9 +445,10 @@ function renderDailyChart(dates) {{
   const models = Object.keys(totals).filter(m => totals[m] > 0);
 
   const maxBarPx = 80;
+  const days = chartDays(filterFrom, filterTo, allDates);
   const datasets = models.map((m, i) => ({{
     label: m.replace('claude-', ''),
-    data: dates.map(d => {{
+    data: days.map(d => {{
       const v = RAW.by_date[d]?.[m];
       return v ? billableTokens(v) : 0;
     }}),
@@ -438,7 +456,7 @@ function renderDailyChart(dates) {{
     maxBarThickness: maxBarPx,
   }}));
 
-  const labels = dates.map(d => d.slice(5)); // MM-DD
+  const labels = days.map(d => d.slice(5)); // MM-DD
 
   if (dailyChart) {{ dailyChart.destroy(); }}
 
@@ -617,10 +635,16 @@ btnCustom.addEventListener('click', () => {{
     dateRangeEl.classList.add('visible');
     fpFrom.setDate(filterFrom || (allDates.length ? allDates[0] : today), false);
     fpTo.setDate(filterTo || today, false);
+    clearRangeHint();
   }}
   document.querySelectorAll('.filter-bar button').forEach(b => b.classList.remove('active'));
   btnCustom.classList.add('active');
 }});
+
+function clearRangeHint() {{
+  rangeHint.textContent = '';
+  rangeHint.className = 'range-hint';
+}}
 
 function applyCustomRange() {{
   const from = dateFromEl.value;
@@ -633,8 +657,7 @@ function applyCustomRange() {{
     return;
   }}
 
-  rangeHint.textContent = '';
-  rangeHint.className = 'range-hint';
+  clearRangeHint();
 
   filterFrom = from;
   filterTo = to;
