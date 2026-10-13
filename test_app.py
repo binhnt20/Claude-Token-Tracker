@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sys
+import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -59,13 +62,65 @@ class TestNativeWindow(unittest.TestCase):
 
         def start(**kwargs):
             page = Path(fake.windows[-1]["url"])
-            seen["folder"], seen["files"] = page.parent, sorted(p.name for p in page.parent.iterdir())
+            seen["folder"], seen["files"] = page.parent, [p.name for p in page.parent.iterdir()]
 
         fake.start = start
         with mock.patch.dict(sys.modules, {"webview": fake}):
             app.open_native_window("<p>hi</p>")
-        self.assertEqual(seen["files"], ["index.html"])
+        self.assertEqual(len(seen["files"]), 1)
         self.assertFalse(seen["folder"].exists())
+
+    def test_folder_is_removed_when_the_window_fails(self):
+        fake = FakeWebview()
+        seen = {}
+
+        def start(**kwargs):
+            seen["folder"] = Path(fake.windows[-1]["url"]).parent
+            raise RuntimeError("no display")
+
+        fake.start = start
+        with mock.patch.dict(sys.modules, {"webview": fake}), self.assertRaises(RuntimeError):
+            app.open_native_window("<p>hi</p>")
+        self.assertFalse(seen["folder"].exists())
+
+    def test_page_name_cannot_be_guessed(self):
+        """The page is served on 127.0.0.1 while the window is open; another local user must not find it by name."""
+        names = {Path(self.open("<p>hi</p>").windows[0]["url"]).name for _ in range(2)}
+        self.assertEqual(len(names), 2)
+        for name in names:
+            self.assertTrue(name.endswith(".html"))
+            self.assertGreaterEqual(len(name), 20)
+
+
+class TestStalePages(unittest.TestCase):
+    """Cmd+Q on macOS ends the process inside webview.start(), so its folder outlives it; the next launch removes it."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        patcher = mock.patch.object(tempfile, "tempdir", tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def folder(self, name: str, age_hours: float) -> Path:
+        folder = self.base / name
+        folder.mkdir()
+        (folder / "page.html").write_text("x", encoding="utf-8")
+        then = time.time() - age_hours * 3600
+        os.utime(folder, (then, then))
+        return folder
+
+    def test_old_page_folders_go_and_the_rest_stays(self):
+        old = self.folder("claude-token-tracker-old", age_hours=25)
+        running = self.folder("claude-token-tracker-running", age_hours=1)
+        unrelated = self.folder("someone-else-old", age_hours=48)
+        fake = FakeWebview()
+        with mock.patch.dict(sys.modules, {"webview": fake}):
+            app.open_native_window("<p>hi</p>")
+        self.assertFalse(old.exists())
+        self.assertTrue(running.exists())
+        self.assertTrue(unrelated.exists())
 
 
 class TestNoTranscripts(unittest.TestCase):

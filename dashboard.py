@@ -72,8 +72,9 @@ function sumProjects(byDateProject, dates) {
   });
   return Object.values(acc);
 }
-// Share of a project's requests that the cost covers. Rounded down: 99.6% must not read as "100%".
-function pricedPercent(p) { return Math.floor((p.requests - p.unpricedRequests) / p.requests * 100); }
+// Share of a project's requests that the cost covers. Rounded down: 99.6% must not read as "100%". Multiplying
+// first keeps exact shares exact (58 / 100 * 100 is 57.99999999999999).
+function pricedPercent(p) { return Math.floor((p.requests - p.unpricedRequests) * 100 / p.requests); }
 // Project names are folder paths and may hold any character.
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);

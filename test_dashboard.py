@@ -147,6 +147,9 @@ class TestProjectHelpers(unittest.TestCase):
             assert.strictEqual(pricedPercent({ requests: 1000, unpricedRequests: 4 }), 99);
             assert.strictEqual(pricedPercent({ requests: 3, unpricedRequests: 1 }), 66);
             assert.strictEqual(pricedPercent({ requests: 1000, unpricedRequests: 999 }), 0);
+            // 58 / 100 * 100 is 57.99999999999999 in floating point.
+            assert.strictEqual(pricedPercent({ requests: 100, unpricedRequests: 42 }), 58);
+            assert.strictEqual(pricedPercent({ requests: 100, unpricedRequests: 71 }), 29);
         """)
         self.assertEqual(result.returncode, 0, result.stderr)
 

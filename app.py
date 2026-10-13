@@ -8,9 +8,11 @@ from __future__ import annotations
 import html as html_lib
 import json
 import os
+import secrets
 import shutil
 import sys
 import tempfile
+import time
 import webbrowser
 from pathlib import Path
 
@@ -154,21 +156,41 @@ def not_found_html(exc: TranscriptsNotFound) -> str:
             "then open this app again.</p></body></html>")
 
 
+PAGE_FOLDER_PREFIX = "claude-token-tracker-"
+STALE_PAGE_SECONDS = 24 * 60 * 60
+
+
+def _remove_stale_page_folders() -> None:
+    """Delete page folders an earlier run left behind: Cmd+Q on macOS or a kill ends the process inside webview.start().
+
+    A day old is old enough not to be a window that is still open.
+    """
+    now = time.time()
+    for folder in Path(tempfile.gettempdir()).glob(PAGE_FOLDER_PREFIX + "*"):
+        try:
+            if folder.is_dir() and not folder.is_symlink() and now - folder.stat().st_mtime > STALE_PAGE_SECONDS:
+                shutil.rmtree(folder, ignore_errors=True)
+        except OSError:
+            pass
+
+
 def open_native_window(html: str):
     """Open dashboard in a native OS window using pywebview.
 
     The page is loaded from a file, not passed as html=: that goes through Qt setHtml / WebView2 NavigateToString,
     which show a blank window once the page passes 2 MB. pywebview serves a plain path's folder on 127.0.0.1, so the
-    page gets a private folder of its own, removed when the window closes.
+    page gets a private folder of its own, removed when the window closes, and a random name, so another local user
+    cannot read it from the server by guessing.
     """
     import webview
 
     if sys.platform == "darwin":
         _setup_macos_dock()
 
-    folder = Path(tempfile.mkdtemp(prefix="claude-token-tracker-"))
+    _remove_stale_page_folders()
+    folder = Path(tempfile.mkdtemp(prefix=PAGE_FOLDER_PREFIX))
     try:
-        page = folder / "index.html"
+        page = folder / f"{secrets.token_urlsafe(16)}.html"
         page.write_text(html, encoding="utf-8")
         webview.create_window(
             APP_NAME,
