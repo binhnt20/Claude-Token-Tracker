@@ -432,6 +432,22 @@ class TestReport(TranscriptCase):
 
 
 class TestPrintSummary(TranscriptCase):
+    def test_recent_dates_end_today_and_name_a_day_after_it(self):
+        """Headed TOP DATES, the list held the 7 latest days, led by a day a wrong clock put in the future."""
+        self.write([assistant_line(msg_id=day, request_id=day, timestamp=f"{day}T12:00:00Z")
+                    for day in ("2026-10-22", "2026-10-13", "2026-10-12")], folder="-work-repo")
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[Path(self.tmp.name)]):
+            report = build_report(*collect_all_entries())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            track_tokens.print_summary(report, today="2026-10-13")
+        text = out.getvalue()
+        self.assertNotIn("TOP DATES", text)
+        listed = text.split("RECENT DATES:\n")[1].split("\n\n")[0].splitlines()
+        self.assertEqual([line.split(":")[0].strip() for line in listed], ["2026-10-13", "2026-10-12"])
+        self.assertIn("1 day after today", text)
+        self.assertIn("2026-10-22", text)
+
     def test_non_ascii_project_on_a_cp1252_stdout(self):
         """A redirected Windows stdout is cp1252; a Vietnamese folder name must not crash the summary."""
         self.write([assistant_line(cwd="D:\\Dự án\\repo")], folder="D--D--n-repo")

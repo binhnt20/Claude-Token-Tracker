@@ -428,8 +428,8 @@ def safe_console() -> None:
             stream.reconfigure(errors="replace")
 
 
-def print_summary(report: dict):
-    """Print a human-readable summary to stdout."""
+def print_summary(report: dict, today: str | None = None):
+    """Print a human-readable summary to stdout. today (YYYY-MM-DD) defaults to the local day."""
     safe_console()
     s = report["summary"]
     print("=" * 60)
@@ -469,17 +469,20 @@ def print_summary(report: dict):
               f"{', '.join(s['unpriced_models'])}")
     print("-" * 60)
 
-    # Top 5 dates
-    dates = report["by_date"]
-    if dates:
-        print("\n  TOP DATES:")
-        for i, (date, models) in enumerate(dates.items()):
-            if i >= 7:
-                break
+    # The 7 latest days up to today. A day after today comes from a wrong clock: counted, named, not listed.
+    today = today or datetime.now().astimezone().strftime("%Y-%m-%d")
+    recent = [(date, models) for date, models in report["by_date"].items() if date <= today][:7]
+    later = sorted(date for date in report["by_date"] if date > today)
+    if recent:
+        print("\n  RECENT DATES:")
+        for date, models in recent:
             day_total = sum(total_tokens(m) for m in models.values())
             day_reqs = sum(m["requests"] for m in models.values())
             model_list = ", ".join(models.keys())
             print(f"    {date}: {day_total:>10,} tokens ({day_reqs:,} reqs) [{model_list}]")
+    if later:
+        days = f"{len(later)} day" + ("" if len(later) == 1 else "s")
+        print(f"\n  ! {days} after today, counted above (a computer clock was wrong?): {', '.join(later)}")
 
     projects = report["by_project"]
     if projects:
