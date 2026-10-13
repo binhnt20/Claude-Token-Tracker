@@ -21,8 +21,8 @@ def _is_dir(path: Path) -> bool:
         return False
 
 
-def transcript_roots(env: Mapping[str, str] | None = None, home: Path | None = None) -> list[Path]:
-    """Return the existing `projects` directories Claude Code writes to, without duplicates, in order.
+def transcript_candidates(env: Mapping[str, str] | None = None, home: Path | None = None) -> list[Path]:
+    """Every `projects` directory Claude Code may write to, whether it exists or not, in order.
 
     CLAUDE_CONFIG_DIR (a comma-separated list) replaces the defaults; otherwise both the legacy
     ~/.claude and the XDG ~/.config/claude locations are read, since installs have used each.
@@ -32,12 +32,14 @@ def transcript_roots(env: Mapping[str, str] | None = None, home: Path | None = N
 
     config_dirs = [part.strip() for part in env.get("CLAUDE_CONFIG_DIR", "").split(",") if part.strip()]
     if config_dirs:
-        candidates = [Path(d).expanduser() / "projects" for d in config_dirs]
-    else:
-        candidates = [home / ".claude" / "projects", home / ".config" / "claude" / "projects"]
+        return [Path(d).expanduser() / "projects" for d in config_dirs]
+    return [home / ".claude" / "projects", home / ".config" / "claude" / "projects"]
 
+
+def transcript_roots(env: Mapping[str, str] | None = None, home: Path | None = None) -> list[Path]:
+    """Return the candidates that exist, without duplicates, in order."""
     roots, seen = [], set()
-    for candidate in candidates:
+    for candidate in transcript_candidates(env, home):
         if not _is_dir(candidate):
             continue
         real = candidate.resolve()

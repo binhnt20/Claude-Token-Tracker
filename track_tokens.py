@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Claude Code Token Usage Tracker (MVP)
-Scans ~/.claude/projects/ transcripts and aggregates token usage into a JSON report.
+Scans Claude Code transcripts (sources.py lists the folders) and aggregates token usage into a JSON report.
 """
 
 from __future__ import annotations
@@ -11,11 +11,11 @@ import re
 import sys
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 from pricing import COST_PARTS, cost_usd, normalize_model
-from sources import iter_transcripts, transcript_roots
+from sources import iter_transcripts, transcript_candidates, transcript_roots
 
 # Kept for callers that import it; collect_all_entries reads every root from sources.transcript_roots().
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
@@ -33,6 +33,20 @@ TOKEN_KEYS = (
 # Cache reads are excluded: they run an order of magnitude above every other count and
 # would swamp the totals.
 BILLABLE_TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens")
+
+# Claude Code writes this model name on lines it makes up itself (an interrupted turn, an error); no API call is behind
+# them, so they are not requests.
+SYNTHETIC_MODEL = "<synthetic>"
+
+
+class TranscriptsNotFound(Exception):
+    """No transcripts folder exists; `candidates` are the folders that were looked in."""
+
+    def __init__(self, candidates: list[Path]):
+        self.candidates = candidates
+        looked_in = "\n".join(f"  {c}" for c in candidates)
+        super().__init__(f"No Claude Code transcripts folder found. Looked in:\n{looked_in}\n"
+                         "Set CLAUDE_CONFIG_DIR if Claude Code keeps its data somewhere else.")
 
 
 def fmt_num(n: int) -> str:
@@ -78,10 +92,10 @@ def _parse_timestamp(timestamp: str) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def entry_date(timestamp: str) -> str | None:
-    """The user's local YYYY-MM-DD for an ISO timestamp, or None when it cannot be parsed."""
+def entry_date(timestamp: str, tz: tzinfo | None = None) -> str | None:
+    """The YYYY-MM-DD for an ISO timestamp in tz (default: the user's local zone), or None when it cannot be parsed."""
     dt = _parse_timestamp(timestamp)
-    return dt.astimezone().strftime("%Y-%m-%d") if dt else None
+    return dt.astimezone(tz).strftime("%Y-%m-%d") if dt else None
 
 
 def utc_date(timestamp: str) -> str | None:
@@ -107,6 +121,12 @@ def accumulate(stats: dict, entry: dict) -> None:
     else:
         stats["unpriced_requests"] += 1
         stats["unpriced_tokens"] += total_tokens(entry)
+
+
+def _count(mapping: dict, key: str) -> int:
+    """A token or request count from a usage object; a missing or null field counts as 0."""
+    value = mapping.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def record_key(entry: dict, message: dict) -> str | None:
@@ -140,7 +160,8 @@ def parse_transcript(filepath: Path) -> list[dict]:
     """Parse a JSONL transcript file into one record per usage line, each carrying its own cost."""
     entries = []
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        # A byte that is not UTF-8 becomes U+FFFD, so it costs at most its own line, never the rest of the file.
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             for lineno, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
@@ -165,7 +186,7 @@ def parse_transcript(filepath: Path) -> list[dict]:
                     continue
 
                 timestamp = entry.get("timestamp")
-                if not timestamp:
+                if not timestamp or message.get("model") == SYNTHETIC_MODEL:
                     continue
 
                 # Canonical name: snapshot suffixes price identically, so folding them here
@@ -177,13 +198,13 @@ def parse_transcript(filepath: Path) -> list[dict]:
                 # Fast mode is its own series on the charts; pricing applies its multiplier.
                 model = f"{price_model} (fast)" if speed == "fast" else price_model
                 server_tools = usage.get("server_tool_use")
-                web_searches = server_tools.get("web_search_requests", 0) if isinstance(server_tools, dict) else 0
+                web_searches = _count(server_tools, "web_search_requests") if isinstance(server_tools, dict) else 0
 
                 cache_creation = usage.get("cache_creation")
                 unmodelled_cache = False
                 if isinstance(cache_creation, dict):
-                    cache_5m = cache_creation.get("ephemeral_5m_input_tokens", 0)
-                    cache_1h = cache_creation.get("ephemeral_1h_input_tokens", 0)
+                    cache_5m = _count(cache_creation, "ephemeral_5m_input_tokens")
+                    cache_1h = _count(cache_creation, "ephemeral_1h_input_tokens")
                     # Derive the total from the split rather than reading
                     # cache_creation_input_tokens: on a handful of entries the top-level
                     # figure under-reports the split, and deriving keeps the counters and
@@ -195,7 +216,7 @@ def parse_transcript(filepath: Path) -> list[dict]:
                     unmodelled_cache = declared != cache_write_total
                 else:
                     # Older transcripts carry only the total, with no 5m/1h split.
-                    cache_write_total = usage.get("cache_creation_input_tokens", 0)
+                    cache_write_total = _count(usage, "cache_creation_input_tokens")
                     cache_5m = cache_write_total
                     cache_1h = 0
 
@@ -209,13 +230,13 @@ def parse_transcript(filepath: Path) -> list[dict]:
                     "is_sidechain": bool(entry.get("isSidechain")),
                     "speed": speed,
                     "inference_geo": usage.get("inference_geo"),
-                    "web_search_requests": web_searches or 0,
-                    "input_tokens": usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
+                    "web_search_requests": web_searches,
+                    "input_tokens": _count(usage, "input_tokens"),
+                    "output_tokens": _count(usage, "output_tokens"),
                     "cache_creation_input_tokens": cache_write_total,
                     "cache_creation_5m_tokens": cache_5m,
                     "cache_creation_1h_tokens": cache_1h,
-                    "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+                    "cache_read_input_tokens": _count(usage, "cache_read_input_tokens"),
                 }
 
                 # Price windows follow the UTC date of the call.
@@ -225,7 +246,7 @@ def parse_transcript(filepath: Path) -> list[dict]:
                 else:
                     record["cost"] = None
                 entries.append(record)
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         pass
     return entries
 
@@ -247,11 +268,14 @@ def project_display_name(dir_name: str, cwds: Iterable[str], home: Path | None =
     if name is None:
         return dir_name
     home_str = str(Path.home() if home is None else home).rstrip("/\\")
-    if name == home_str:
+    # Windows paths ignore case: C:\Users\binh is the home of C:\Users\Binh\repo. The shown name keeps its own case.
+    same = (lambda a, b: a.casefold() == b.casefold()) if re.match(r"[A-Za-z]:", home_str) else str.__eq__
+    head, rest = name[:len(home_str)], name[len(home_str):]
+    if not home_str or not same(head, home_str):
+        return name
+    if not rest:
         return "~"
-    if home_str and name.startswith(home_str) and name[len(home_str)] in "/\\":
-        return "~" + name[len(home_str):]
-    return name
+    return "~" + rest if rest[0] in "/\\" else name
 
 
 def add_stats(into: dict, stats: dict) -> None:
@@ -287,8 +311,7 @@ def collect_all_entries() -> tuple[list[dict], dict]:
 
     roots = transcript_roots()
     if not roots:
-        print(f"Claude directory not found: {CLAUDE_DIR}")
-        sys.exit(1)
+        raise TranscriptsNotFound(transcript_candidates())
 
     by_dir = defaultdict(list)
     for root in roots:
@@ -459,7 +482,11 @@ def main():
             date_filter = arg  # Expect YYYY-MM-DD
 
     print("Scanning Claude Code transcripts...")
-    all_entries, project_totals = collect_all_entries()
+    try:
+        all_entries, project_totals = collect_all_entries()
+    except TranscriptsNotFound as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(1)
     print(f"Found {len(all_entries):,} assistant responses across {len(project_totals)} projects\n")
 
     report = build_report(all_entries, project_totals, date_filter)

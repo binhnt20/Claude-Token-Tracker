@@ -10,13 +10,15 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 import pricing
 import track_tokens
-from sources import iter_transcripts, transcript_roots
+from sources import iter_transcripts, transcript_candidates, transcript_roots
 from track_tokens import (
+    TranscriptsNotFound,
     build_report,
     collect_all_entries,
     dedupe,
@@ -166,6 +168,53 @@ class TestRecordFields(TranscriptCase):
         self.assertAlmostEqual(record["cost"]["cache_read"], 0.20)
 
 
+class TestLineQuality(TranscriptCase):
+    def test_synthetic_lines_are_not_requests(self):
+        """Claude Code writes '<synthetic>' lines itself (no API call, 0 tokens); they must not count as requests."""
+        path = self.write([assistant_line(request_id="r1"),
+                           assistant_line(msg_id="m2", request_id="r2", model="<synthetic>", output=0,
+                                          input_tokens=0, cache_read=0)])
+        records = parse_transcript(path)
+        self.assertEqual([r["price_model"] for r in records], ["claude-opus-5-5"])
+
+    def test_synthetic_leaves_no_unpriced_note(self):
+        self.write([assistant_line(request_id="r1"),
+                    assistant_line(msg_id="m2", request_id="r2", model="<synthetic>", output=0, input_tokens=0,
+                                   cache_read=0)], folder="-work-repo")
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[Path(self.tmp.name)]):
+            summary = build_report(*collect_all_entries())["summary"]
+        self.assertEqual(summary["requests"], 1)
+        self.assertEqual(summary["unpriced_requests"], 0)
+
+    def test_null_token_fields_count_as_zero(self):
+        line = assistant_line(output=None, input_tokens=None, cache_read=None)
+        line["message"]["usage"]["cache_creation"] = {"ephemeral_5m_input_tokens": None,
+                                                      "ephemeral_1h_input_tokens": 3}
+        self.write([line], folder="-work-repo")
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[Path(self.tmp.name)]):
+            summary = build_report(*collect_all_entries())["summary"]
+        self.assertEqual(summary["output_tokens"], 0)
+        self.assertEqual(summary["cache_creation_1h_tokens"], 3)
+        self.assertEqual(summary["unpriced_requests"], 0)
+
+    def test_legacy_null_cache_total_counts_as_zero(self):
+        line = assistant_line()
+        line["message"]["usage"].pop("cache_creation")
+        line["message"]["usage"]["cache_creation_input_tokens"] = None
+        (record,) = parse_transcript(self.write([line]))
+        self.assertEqual(record["cache_creation_input_tokens"], 0)
+        self.assertIsNotNone(record["cost"])
+
+    def test_one_bad_byte_drops_nothing_else(self):
+        """An undecodable byte used to abandon the rest of the file."""
+        good = [json.dumps(assistant_line(request_id=f"r{i}")).encode() for i in (1, 2, 3)]
+        bad_cwd = good[1].replace(b"/work/repo", b"/work/r\xffepo")
+        path = Path(self.tmp.name) / "bad.jsonl"
+        path.write_bytes(b"\n".join([good[0], bad_cwd, good[2]]) + b"\n")
+        records = parse_transcript(path)
+        self.assertEqual([r["key"] for r in records], ["msg_1:r1", "msg_1:r2", "msg_1:r3"])
+
+
 class TestCollectAllEntries(TranscriptCase):
     def test_project_totals_count_each_call_once(self):
         self.write([assistant_line(output=8), assistant_line(output=471)], name="a.jsonl", folder="-work-repo")
@@ -177,6 +226,26 @@ class TestCollectAllEntries(TranscriptCase):
         self.assertEqual(stats["requests"], 1)
         self.assertEqual(stats["output_tokens"], 471)
         self.assertIn("web_search", stats["cost"])
+
+    def test_not_found_names_every_folder_looked_in(self):
+        missing = [Path(self.tmp.name) / "a", Path(self.tmp.name) / "b"]
+        env = {"CLAUDE_CONFIG_DIR": ",".join(str(m) for m in missing)}
+        with mock.patch.dict(os.environ, env), self.assertRaises(TranscriptsNotFound) as caught:
+            collect_all_entries()
+        self.assertEqual(caught.exception.candidates, [m / "projects" for m in missing])
+        for folder in missing:
+            self.assertIn(str(folder / "projects"), str(caught.exception))
+
+    def test_cli_reports_not_found_on_stderr_and_exits_1(self):
+        err = io.StringIO()
+        with mock.patch.object(track_tokens, "collect_all_entries",
+                               side_effect=TranscriptsNotFound([Path("/nowhere/projects")])), \
+                mock.patch.object(track_tokens.sys, "argv", ["track_tokens.py"]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit) as caught:
+            track_tokens.main()
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("/nowhere/projects", err.getvalue())
 
 
 @unittest.skipUnless(hasattr(time, "tzset"), "time.tzset is POSIX only")
@@ -197,6 +266,19 @@ class TestLocalDates(unittest.TestCase):
     def test_bad_timestamps(self):
         self.assertIsNone(entry_date("not a time"))
         self.assertIsNone(utc_date(None))
+
+
+class TestLocalDatesAnyPlatform(unittest.TestCase):
+    """The same local-day rules with an explicit zone, so they also run where time.tzset does not exist."""
+
+    def test_east_of_utc(self):
+        self.assertEqual(entry_date("2026-10-12T18:30:00Z", tz=timezone(timedelta(hours=7))), "2026-10-13")
+
+    def test_west_of_utc(self):
+        self.assertEqual(entry_date("2026-10-13T03:00:00Z", tz=timezone(timedelta(hours=-7))), "2026-10-12")
+
+    def test_offset_in_the_timestamp_is_honoured(self):
+        self.assertEqual(entry_date("2026-10-13T01:00:00+09:00", tz=timezone.utc), "2026-10-12")
 
 
 class TestProjectNames(unittest.TestCase):
@@ -222,6 +304,15 @@ class TestProjectNames(unittest.TestCase):
 
     def test_home_itself_is_tilde(self):
         self.assertEqual(project_display_name("-home-u", {"/home/u"}, home=Path("/home/u")), "~")
+
+    def test_windows_home_matches_whatever_the_case(self):
+        """Windows paths ignore case: C:\\Users\\binh and C:\\Users\\Binh are the same folder."""
+        name = project_display_name("C--Users-Binh-Code-Repo", {"C:\\Users\\Binh\\Code\\Repo"},
+                                    home=Path("c:\\users\\binh"))
+        self.assertEqual(name, "~\\Code\\Repo")
+
+    def test_posix_home_stays_case_sensitive(self):
+        self.assertEqual(project_display_name("-Home-U-x", {"/Home/U/x"}, home=Path("/home/u")), "/Home/U/x")
 
 
 class TestReport(TranscriptCase):
@@ -298,6 +389,14 @@ class TestSources(unittest.TestCase):
     def test_default_reads_both_home_dirs(self):
         legacy, xdg = self.mkdirs("home/.claude/projects", "home/.config/claude/projects")
         self.assertEqual(transcript_roots(env={}, home=self.base / "home"), [legacy, xdg])
+
+    def test_candidates_are_every_folder_looked_in(self):
+        home = self.base / "home"
+        self.assertEqual(transcript_candidates(env={}, home=home),
+                         [home / ".claude" / "projects", home / ".config" / "claude" / "projects"])
+        env = {"CLAUDE_CONFIG_DIR": f"{self.base / 'a'}, {self.base / 'b'}"}
+        self.assertEqual(transcript_candidates(env=env, home=home),
+                         [self.base / "a" / "projects", self.base / "b" / "projects"])
 
     def test_missing_dirs_are_skipped(self):
         (legacy,) = self.mkdirs("home/.claude/projects")
