@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ctypes.util
 import html as html_lib
+import logging
 import os
 import secrets
 import shutil
@@ -188,6 +189,21 @@ def native_window_blocker(platform: str, env: Mapping[str, str], find_library: C
     return None
 
 
+class _OneLineBackendErrors(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage().endswith("cannot be loaded"):
+            record.exc_info = record.exc_text = None
+        return True
+
+
+_ONE_LINE_BACKEND_ERRORS = _OneLineBackendErrors()
+
+
+def quiet_backend_tracebacks() -> None:
+    """pywebview logs a traceback per GUI backend it cannot load; its one-line message and the fallback note say enough."""
+    logging.getLogger("pywebview").addFilter(_ONE_LINE_BACKEND_ERRORS)
+
+
 def open_native_window(html: str):
     """Open dashboard in a native OS window using pywebview.
 
@@ -216,6 +232,7 @@ def open_native_window(html: str):
             height=800,
             min_size=(800, 600),
         )
+        quiet_backend_tracebacks()
         # On Linux we ship the self-contained Qt/QtWebEngine backend; force it so
         # pywebview does not fall back to the system GTK/WebKit stack.
         if sys.platform.startswith("linux"):

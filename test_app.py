@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import logging
 import os
 import sys
 import tempfile
@@ -137,6 +138,42 @@ class TestNativeWindowBlocker(unittest.TestCase):
             app.open_native_window("<p>hi</p>")
         mkdtemp.assert_not_called()
         self.assertEqual(fake.windows, [])
+
+
+class TestBackendLog(unittest.TestCase):
+    """pywebview logs a full traceback for each GUI backend it cannot load, before the app's one-line fallback note."""
+
+    def capture(self) -> io.StringIO:
+        out = io.StringIO()
+        handler = logging.StreamHandler(out)
+        logger = logging.getLogger("pywebview")
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        app.quiet_backend_tracebacks()
+        return out
+
+    def log_exception(self, message: str) -> None:
+        try:
+            raise ImportError("No module named 'qtpy'")
+        except ImportError:
+            logging.getLogger("pywebview").exception(message)
+
+    def test_a_backend_that_cannot_load_is_one_line(self):
+        out = self.capture()
+        self.log_exception("QT cannot be loaded")
+        self.assertEqual(out.getvalue(), "QT cannot be loaded\n")
+
+    def test_other_errors_keep_their_traceback(self):
+        out = self.capture()
+        self.log_exception("Error occurred in window")
+        self.assertIn("Traceback", out.getvalue())
+
+    def test_the_window_installs_it(self):
+        allow_native_window(self)
+        with mock.patch.dict(sys.modules, {"webview": FakeWebview()}), \
+                mock.patch.object(app, "quiet_backend_tracebacks") as quiet:
+            app.open_native_window("<p>hi</p>")
+        quiet.assert_called_once_with()
 
 
 class TestStalePages(unittest.TestCase):
