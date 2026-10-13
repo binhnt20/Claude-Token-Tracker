@@ -248,6 +248,48 @@ class TestCollectAllEntries(TranscriptCase):
         self.assertIn("/nowhere/projects", err.getvalue())
 
 
+class TestCliArguments(unittest.TestCase):
+    """track_tokens.py [today | yesterday | YYYY-MM-DD | -h]: a typo must not print an empty report that exits 0."""
+
+    def run_cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with mock.patch.object(track_tokens, "collect_all_entries", return_value=([], {})) as collect, \
+                mock.patch.object(track_tokens, "build_report", wraps=build_report) as report, \
+                mock.patch.object(track_tokens, "OUTPUT_FILE", Path(tmp.name) / "token_usage.json"), \
+                mock.patch.object(track_tokens.sys, "argv", ["track_tokens.py", *args]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                track_tokens.main()
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue(), err.getvalue(), collect, report
+
+    def test_help_prints_usage_without_scanning(self):
+        for flag in ("-h", "--help"):
+            code, out, _err, collect, _report = self.run_cli(flag)
+            self.assertEqual(code, 0)
+            self.assertIn("usage", out.lower())
+            self.assertIn("YYYY-MM-DD", out)
+            collect.assert_not_called()
+
+    def test_a_date_that_does_not_exist_exits_2_without_scanning(self):
+        for arg in ("2026-13-45", "2026-02-30", "tomorrow", "--today"):
+            code, _out, err, collect, _report = self.run_cli(arg)
+            self.assertEqual(code, 2, arg)
+            self.assertIn(arg, err)
+            collect.assert_not_called()
+
+    def test_a_real_date_filters_on_the_zero_padded_day(self):
+        for arg, day in (("2026-10-10", "2026-10-10"), ("2026-1-5", "2026-01-05")):
+            code, out, _err, _collect, report = self.run_cli(arg)
+            self.assertEqual(code, 0)
+            self.assertEqual(report.call_args.args[2], day)
+            self.assertIn(f"Filter: {day}", out)
+
+
 @unittest.skipUnless(hasattr(time, "tzset"), "time.tzset is POSIX only")
 class TestLocalDates(unittest.TestCase):
     def setUp(self):

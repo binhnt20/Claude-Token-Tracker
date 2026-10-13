@@ -469,17 +469,29 @@ def print_summary(report: dict):
     print("=" * 60)
 
 
+USAGE = """Usage: python3 track_tokens.py [today | yesterday | YYYY-MM-DD]
+  No argument: all-time report. Days are this computer's local days.
+  Prints a summary and writes token_usage.json next to this script."""
+
+
 def main():
     date_filter = None
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         # Days are the user's local days, the same buckets the report uses.
+        if arg in ("-h", "--help"):
+            print(USAGE)
+            sys.exit(0)
         if arg == "today":
             date_filter = datetime.now().astimezone().strftime("%Y-%m-%d")
         elif arg == "yesterday":
             date_filter = (datetime.now().astimezone() - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
-            date_filter = arg  # Expect YYYY-MM-DD
+            try:
+                date_filter = datetime.strptime(arg, "%Y-%m-%d").date().isoformat()
+            except ValueError:
+                print(f"Not a date: {arg!r}\n{USAGE}", file=sys.stderr)
+                sys.exit(2)
 
     print("Scanning Claude Code transcripts...")
     try:
