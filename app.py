@@ -9,6 +9,7 @@ import ctypes.util
 import html as html_lib
 import logging
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -57,7 +58,28 @@ APPS_DIR = Path.home() / ".local" / "share" / "applications"
 ICONS_DIR = Path.home() / ".local" / "share" / "icons"
 
 
-def _install_desktop_entry():
+def _desktop_string(value: str) -> str:
+    """A Desktop Entry string value, with backslash and the control characters escaped."""
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+
+
+def desktop_entry(launcher: Path, icon: str) -> str:
+    """The .desktop file for the menu. Exec= quotes the launcher, so a home folder with a space or $ still runs.
+
+    Inside the quotes the spec reserves " ` $ \\; the string escape applies on top, and % is doubled (field codes).
+    """
+    exec_arg = '"' + re.sub(r'(["`$\\])', r"\\\1", str(launcher)) + '"'
+    return ("[Desktop Entry]\n"
+            f"Name={APP_NAME}\n"
+            "Comment=Claude Code token usage dashboard\n"
+            f"Exec={_desktop_string(exec_arg).replace('%', '%%')}\n"
+            f"Icon={_desktop_string(icon)}\n"
+            "Type=Application\n"
+            "Categories=Utility;Development;\n"
+            "Terminal=false\n")
+
+
+def _install_desktop_entry() -> bool:
     """Install the app into ~/.local so it launches from the menu without FUSE.
 
     The AppImage is extracted once into ~/.local/lib/<id> and the .desktop
@@ -66,8 +88,8 @@ def _install_desktop_entry():
     """
     appimage = os.environ.get("APPIMAGE")
     if not appimage:
-        print("  --install only works when running from the .AppImage.")
-        return
+        print("  --install only works when running from the .AppImage.", file=sys.stderr)
+        return False
 
     import shutil
     import subprocess
@@ -97,20 +119,11 @@ def _install_desktop_entry():
     icon_value = str(icon_dest) if icon_dest.exists() else "utilities-system-monitor"
 
     desktop = APPS_DIR / f"{DESKTOP_ID}.desktop"
-    desktop.write_text(
-        "[Desktop Entry]\n"
-        f"Name={APP_NAME}\n"
-        "Comment=Claude Code token usage dashboard\n"
-        f"Exec={launcher}\n"
-        f"Icon={icon_value}\n"
-        "Type=Application\n"
-        "Categories=Utility;Development;\n"
-        "Terminal=false\n",
-        encoding="utf-8",
-    )
+    desktop.write_text(desktop_entry(launcher, icon_value), encoding="utf-8")
     print(f"  Installed to: {INSTALL_DIR}")
     print(f"  Menu entry:   {desktop}")
     print(f'  Search "{APP_NAME}" in your application menu to launch it.')
+    return True
 
 
 def _uninstall_desktop_entry():
@@ -266,8 +279,7 @@ def main():
         sys.exit(0)
 
     if len(sys.argv) > 1 and sys.argv[1] == "--install":
-        _install_desktop_entry()
-        sys.exit(0)
+        sys.exit(0 if _install_desktop_entry() else 1)
 
     if len(sys.argv) > 1 and sys.argv[1] == "--uninstall":
         _uninstall_desktop_entry()

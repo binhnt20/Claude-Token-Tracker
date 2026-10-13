@@ -21,6 +21,13 @@ import app
 import track_tokens
 from track_tokens import TranscriptsNotFound
 
+try:  # GLib is how GNOME and most menus read .desktop files; the tests that use it skip without it.
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+except (ImportError, ValueError):
+    Gio = GLib = None
+
 
 class FakeWebview(types.ModuleType):
     """Records create_window and, at start(), what a real window would load."""
@@ -286,6 +293,53 @@ class TestConsole(unittest.TestCase):
         out.flush()
         opened.assert_called_once()
         self.assertIn("t?m th?i".encode(), raw.getvalue())
+
+
+class TestDesktopEntry(unittest.TestCase):
+    """The Desktop Entry spec quotes an Exec= argument with a space; a home folder with one dropped the entry."""
+
+    ODD_FOLDER = 'h$o"m`e\\d x'
+
+    def test_a_path_with_a_space_is_quoted(self):
+        entry = app.desktop_entry(Path("/home/a b/.local/lib/claude-token-tracker/AppRun"), "/home/a b/icon.png")
+        self.assertIn('Exec="/home/a b/.local/lib/claude-token-tracker/AppRun"\n', entry)
+        self.assertIn("Icon=/home/a b/icon.png\n", entry)
+
+    @unittest.skipIf(GLib is None, "GLib (python3-gi) is not installed")
+    def test_glib_reads_back_the_exact_path(self):
+        for path in ("/home/a b/AppRun", f"/tmp/{self.ODD_FOLDER}/AppRun", "/tmp/100% x/AppRun"):
+            with self.subTest(path=path):
+                keys = GLib.KeyFile()
+                entry = app.desktop_entry(Path(path), "x").encode()
+                keys.load_from_data(entry.decode(), len(entry), GLib.KeyFileFlags.NONE)
+                command = keys.get_string("Desktop Entry", "Exec").replace("%%", "%")
+                self.assertEqual(GLib.shell_parse_argv(command)[1], [path])
+
+    @unittest.skipIf(Gio is None, "GLib (python3-gi) is not installed")
+    def test_the_menu_accepts_the_entry(self):
+        """GLib drops an entry whose launcher it cannot find, which is what an unquoted space did."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for folder in ("home with space", self.ODD_FOLDER):
+            with self.subTest(folder=folder):
+                launcher = Path(tmp.name) / folder / "AppRun"
+                launcher.parent.mkdir()
+                launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+                launcher.chmod(0o755)
+                desktop = Path(tmp.name) / "claude-token-tracker.desktop"
+                desktop.write_text(app.desktop_entry(launcher, "utilities-system-monitor"), encoding="utf-8")
+                self.assertIsNotNone(Gio.DesktopAppInfo.new_from_filename(str(desktop)))
+
+    def test_install_outside_the_appimage_exits_1(self):
+        """It printed that it only works from the .AppImage, then exited 0, so a script thought it had installed."""
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(app.sys, "argv", ["app.py", "--install"]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit) as exit_:
+            os.environ.pop("APPIMAGE", None)
+            app.main()
+        self.assertEqual(exit_.exception.code, 1)
+        self.assertIn(".AppImage", err.getvalue())
 
 
 class TestReportFile(unittest.TestCase):
