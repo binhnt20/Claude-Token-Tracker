@@ -170,6 +170,15 @@ class TestRecordFields(TranscriptCase):
 
 
 class TestLineQuality(TranscriptCase):
+    def test_only_lines_that_name_usage_are_decoded(self):
+        """Most transcript lines are prompts, tool output and progress; skipping them before json.loads halves a scan."""
+        path = self.write([{"type": "user", "message": {"content": "hi"}}, assistant_line(),
+                           {"type": "progress", "data": {"usage note": "not a key"}}])
+        with mock.patch.object(track_tokens.json, "loads", wraps=json.loads) as loads:
+            records = parse_transcript(path)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(loads.call_count, 1)
+
     def test_synthetic_lines_are_not_requests(self):
         """Claude Code writes '<synthetic>' lines itself (no API call, 0 tokens); they must not count as requests."""
         path = self.write([assistant_line(request_id="r1"),

@@ -181,8 +181,8 @@ def parse_transcript(filepath: Path) -> list[dict]:
         # A byte that is not UTF-8 becomes U+FFFD, so it costs at most its own line, never the rest of the file.
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             for lineno, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
+                # A usage object always has this key in its text; most lines (prompts, tool output) do not.
+                if '"usage"' not in line:
                     continue
                 try:
                     entry = json.loads(line)
