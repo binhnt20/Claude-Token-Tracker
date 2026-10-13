@@ -39,6 +39,9 @@ claude-token-tracker/
 pip install pyinstaller pywebview
 ```
 
+Ubuntu 23.04+ / Debian 12+ và Python của Homebrew từ chối `pip install` toàn hệ thống (PEP 668,
+`externally-managed-environment`): tạo venv trước, như ở mục Linux bên dưới.
+
 ### Chạy test trước khi build
 
 ```bash
@@ -76,12 +79,17 @@ python build.py
 Bản Linux dùng backend **Qt/QtWebEngine** (tự chứa Chromium) cho cửa sổ native — không phụ thuộc GTK/WebKit của hệ thống, nên tránh được lỗi xung đột thư viện trên Ubuntu 24.04.
 
 ```bash
-# Cài thư viện runtime cho QtWebEngine (Chromium)
+# Cài thư viện runtime cho QtWebEngine (Chromium). libxcb-cursor0: thiếu nó, Qt không mở được cửa sổ trên X11
+# (app sẽ mở dashboard bằng trình duyệt và in lệnh apt này).
+# Ubuntu 24.04 đổi tên libasound2 thành libasound2t64 (gõ libasound2 thì apt báo "has no installation candidate");
+# Ubuntu 22.04 / Debian 12: thay libasound2t64 bằng libasound2.
 sudo apt-get install -y \
   libnss3 libnspr4 libxcomposite1 libxdamage1 libxrandr2 \
-  libxkbcommon0 libasound2 libgbm1 libxtst6 libxshmfence1
+  libxkbcommon0 libasound2t64 libgbm1 libxtst6 libxshmfence1 libxcb-cursor0 python3-venv
 
-# Python deps cho Linux (thêm qtpy + PySide6, khác macOS/Windows)
+# Python deps cho Linux (thêm qtpy + PySide6, khác macOS/Windows), trong venv vì PEP 668
+python3 -m venv ~/.venvs/ctt-build
+source ~/.venvs/ctt-build/bin/activate
 pip install pyinstaller pywebview qtpy PySide6
 
 # Cài appimagetool để tạo .AppImage
@@ -159,5 +167,8 @@ Sau khi CI chạy xong:
 - **macOS .app**: có thể bị Gatekeeper chặn khi download. User cần chuột phải → Open lần đầu.
 - **Linux .AppImage**: cần `chmod +x` trước khi chạy. Ubuntu 24.04 không cài sẵn FUSE — nếu chạy trực tiếp không mở, dùng `./claude-token-tracker-x86_64.AppImage --appimage-extract-and-run` hoặc `sudo apt install libfuse2t64`.
 - **Đưa app vào menu (Linux)**: chạy `./claude-token-tracker-x86_64.AppImage --appimage-extract-and-run --install` để giải nén app vào `~/.local/lib/` và thêm vào menu ứng dụng — mở từ menu **không cần FUSE**. Gỡ bằng `--uninstall`.
-- **Kích thước AppImage**: bản Linux kèm Chromium (QtWebEngine) nên nặng hơn (~150–200MB).
+- **Kích thước AppImage**: bản Linux kèm Chromium (QtWebEngine) nên nặng hơn (~245 MB, đo ngày 13-10-2026).
+- **File `token_usage.json` của bản đóng gói**: không nằm cạnh app (mount AppImage chỉ đọc, `.app` có chữ ký) mà ở
+  thư mục dữ liệu của user: `~/Library/Application Support/claude-token-tracker/` (macOS),
+  `%LOCALAPPDATA%\claude-token-tracker\` (Windows), `~/.local/share/claude-token-tracker/` (Linux).
 - **Icon**: đã có sẵn cho cả 3 OS trong `assets/`. Nếu cần đổi icon, sửa `gen_icon.py` và chạy lại (chỉ chạy được trên macOS).
