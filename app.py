@@ -257,6 +257,7 @@ def open_in_browser(html: str):
 
 
 def main():
+    track_tokens.safe_console()
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print(f"Usage: {APP_NAME.lower().replace(' ', '-')} [--install | --uninstall]")
         print("  Opens an interactive dashboard with date filtering in the UI.")

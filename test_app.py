@@ -266,6 +266,28 @@ class TestNoTranscripts(unittest.TestCase):
         self.assertIn("CLAUDE_CONFIG_DIR", html)
 
 
+class TestConsole(unittest.TestCase):
+    def test_fallback_survives_a_console_that_cannot_encode_the_path(self):
+        """A user named Nguyễn has a temp path cp1252 cannot encode; printing it to a redirected stdout raised (WIN-4)."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        temp = Path(tmp.name) / "tạm thời"
+        temp.mkdir()
+        raw = io.BytesIO()
+        out = io.TextIOWrapper(raw, encoding="cp1252")
+        missing = TranscriptsNotFound([Path(tmp.name) / "projects"])
+        with mock.patch.object(tempfile, "tempdir", str(temp)), \
+                mock.patch.object(app, "scan_and_report", side_effect=missing), \
+                mock.patch.object(app, "open_native_window", side_effect=RuntimeError("no display")), \
+                mock.patch.object(app.webbrowser, "open") as opened, \
+                mock.patch.object(app.sys, "argv", ["app.py"]), \
+                mock.patch.object(app.sys, "stdout", out), contextlib.redirect_stderr(io.StringIO()):
+            app.main()
+        out.flush()
+        opened.assert_called_once()
+        self.assertIn("t?m th?i".encode(), raw.getvalue())
+
+
 class TestReportFile(unittest.TestCase):
     def test_scan_survives_a_report_file_it_cannot_write(self):
         """An AppImage runs from a read-only mount: a failed token_usage.json write must not stop the window."""

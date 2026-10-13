@@ -300,6 +300,18 @@ class TestCliArguments(unittest.TestCase):
         self.assertIn("could not save", err.getvalue())
         self.assertIn(str(blocker / "token_usage.json"), err.getvalue())
 
+    def test_a_console_that_cannot_encode_the_argument(self):
+        """A redirected Windows console is cp1252: echoing a Vietnamese typo back must not raise."""
+        raw = io.BytesIO()
+        err = io.TextIOWrapper(raw, encoding="cp1252")
+        with mock.patch.object(track_tokens.sys, "argv", ["track_tokens.py", "thử"]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit) as exit_:
+            track_tokens.main()
+        err.flush()
+        self.assertEqual(exit_.exception.code, 2)
+        self.assertIn(b"'th?'", raw.getvalue())
+
     def test_a_real_date_filters_on_the_zero_padded_day(self):
         for arg, day in (("2026-10-10", "2026-10-10"), ("2026-1-5", "2026-01-05")):
             code, out, _err, _collect, report = self.run_cli(arg)

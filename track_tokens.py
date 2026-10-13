@@ -418,11 +418,19 @@ def build_report(all_entries: list[dict], project_totals: dict, date_filter: str
     }
 
 
+def safe_console() -> None:
+    """Print '?' for a character the console cannot encode instead of raising.
+
+    Paths may hold any letter, and a redirected Windows console is cp1252. A windowed app has no streams (None).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
 def print_summary(report: dict):
     """Print a human-readable summary to stdout."""
-    # Project names are paths; a redirected Windows stdout is cp1252 and would raise on most non-Latin names.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(errors="replace")
+    safe_console()
     s = report["summary"]
     print("=" * 60)
     print("  CLAUDE CODE TOKEN USAGE REPORT")
@@ -506,6 +514,7 @@ USAGE = """Usage: python3 track_tokens.py [today | yesterday | YYYY-MM-DD]
 
 
 def main():
+    safe_console()
     date_filter = None
     if len(sys.argv) > 1:
         arg = sys.argv[1]
