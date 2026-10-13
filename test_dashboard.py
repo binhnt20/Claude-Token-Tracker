@@ -327,5 +327,47 @@ class TestGeneratedHtml(unittest.TestCase):
         self.assertIn("clearRangeHint();", handler.group(1))
 
 
+class TestLimitsBox(unittest.TestCase):
+    """Claude Code's share of the plan limits, rendered in Python from report["limits"]."""
+
+    WINDOW = {"kind": "five_hour", "resets_at": 1_760_018_000, "start": 1_760_000_000, "account_pct": 38.0,
+              "claude_code_pct": 30.24, "measured_pct": 29.0, "estimated_pct": 1.24,
+              "as_of": "2025-10-09T13:43:20.000Z", "samples": 12, "current": True}
+
+    def limits(self, **extra):
+        return {"windows": [self.WINDOW], "current": {"five_hour": self.WINDOW, "seven_day": None}, "samples": 12,
+                "enable": "python3 statusline.py --install", "logs": ["/home/u/<x>/limits.jsonl"], **extra}
+
+    def test_current_window(self):
+        html = dashboard.limits_html({"limits": self.limits()})
+        self.assertIn('<div class="limit-value">30.2%</div>', html)
+        self.assertIn("of the 5-hour limit (account total 38.0%)", html)
+        self.assertNotIn("Claude Code used 30.2%", html)
+        self.assertIn("estimate", html)
+        self.assertIn("No sample in the current weekly window yet.", html)
+        self.assertIn("/home/u/&lt;x&gt;/limits.jsonl", html)
+        self.assertNotIn("<x>", html)
+
+    def test_recent_windows_table_holds_ten(self):
+        windows = [dict(self.WINDOW, resets_at=self.WINDOW["resets_at"] - i * 18_000, current=i == 0)
+                   for i in range(14)]
+        html = dashboard.limits_html({"limits": self.limits(windows=windows)})
+        self.assertEqual(html.count('<tr class="limit-window">'), 10)
+
+    def test_no_samples_says_how_to_start(self):
+        html = dashboard.limits_html({"limits": {"windows": [], "current": {"five_hour": None, "seven_day": None},
+                                                 "samples": 0, "enable": "python statusline.py --install",
+                                                 "logs": []}})
+        self.assertIn("python statusline.py --install", html)
+
+    def test_no_limits_key_renders_nothing(self):
+        self.assertEqual(dashboard.limits_html(MINIMAL_REPORT), "")
+
+    def test_page_carries_the_box(self):
+        with mock.patch.object(dashboard, "_load_asset", return_value=""):
+            html = generate_html(dict(MINIMAL_REPORT, limits=self.limits()))
+        self.assertIn('class="limits-box"', html)
+
+
 if __name__ == "__main__":
     unittest.main()

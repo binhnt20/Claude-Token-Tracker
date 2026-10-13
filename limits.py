@@ -186,13 +186,15 @@ def claude_code_share(samples: list[dict], entries: Iterable[dict], now: float) 
     return result
 
 
-def describe(window: dict, tz: tzinfo | None = None) -> str:
-    """`Claude Code used 30.2% of the 5-hour limit (account total 38.0%) · resets 14:05 · as of 13:52`."""
+def describe(window: dict, tz: tzinfo | None = None, lead: bool = True) -> str:
+    """`Claude Code used 30.2% of the 5-hour limit (account total 38.0%) · resets 14:05 · as of 13:52`;
+    without `lead`, from "of the" on (the dashboard shows the number beside it)."""
     def local(t: float, fmt: str) -> str:
         return datetime.fromtimestamp(t, timezone.utc).astimezone(tz).strftime(fmt)
 
     reset_fmt = "%H:%M" if window["kind"] == "five_hour" else "%a %H:%M"
-    return (f"Claude Code used {window['claude_code_pct']:.1f}% of the {LABELS[window['kind']]} limit "
+    head = f"Claude Code used {window['claude_code_pct']:.1f}% " if lead else ""
+    return (f"{head}of the {LABELS[window['kind']]} limit "
             f"(account total {window['account_pct']:.1f}%) · resets {local(window['resets_at'], reset_fmt)} · "
             f"as of {local(_epoch(window['as_of']), '%H:%M')}")
 

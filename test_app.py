@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from unittest import mock
 
 import app
+import limits
 import track_tokens
 from track_tokens import TranscriptsNotFound
 
@@ -460,6 +461,7 @@ class TestReportFile(unittest.TestCase):
         blocker.write_text("", encoding="utf-8")
         err = io.StringIO()
         with mock.patch.object(track_tokens, "collect_all_entries", return_value=([], {})), \
+                mock.patch.object(limits, "report", return_value=limits.claude_code_share([], [], 0)), \
                 mock.patch.object(track_tokens, "OUTPUT_FILE", blocker / "token_usage.json"), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             _report, html = app.scan_and_report()

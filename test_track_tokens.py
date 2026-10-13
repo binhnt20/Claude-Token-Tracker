@@ -15,6 +15,7 @@ from datetime import timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest import mock
 
+import limits
 import pricing
 import track_tokens
 from sources import (iter_transcripts, other_side_homes, running_wsl_distros, transcript_candidates,
@@ -322,6 +323,7 @@ class TestCliArguments(unittest.TestCase):
         blocker.write_text("", encoding="utf-8")
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(track_tokens, "collect_all_entries", return_value=([], {})), \
+                mock.patch.object(limits, "report", return_value=limits.claude_code_share([], [], 0)), \
                 mock.patch.object(track_tokens, "OUTPUT_FILE", blocker / "token_usage.json"), \
                 mock.patch.object(track_tokens.sys, "argv", ["track_tokens.py"]), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -471,6 +473,16 @@ class TestPrintSummary(TranscriptCase):
         self.assertEqual([line.split(":")[0].strip() for line in listed], ["2026-10-13", "2026-10-12"])
         self.assertIn("1 day after today", text)
         self.assertIn("2026-10-22", text)
+
+    def test_plan_limit_lines(self):
+        report = build_report([], {})
+        report["limits"] = {"windows": [], "current": {"five_hour": None, "seven_day": None}, "samples": 0,
+                            "enable": "python3 statusline.py --install", "logs": []}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            track_tokens.print_summary(report)
+        self.assertIn("CLAUDE CODE SHARE OF PLAN LIMITS (estimate)", out.getvalue())
+        self.assertIn("python3 statusline.py --install", out.getvalue())
 
     def test_non_ascii_project_on_a_cp1252_stdout(self):
         """A redirected Windows stdout is cp1252; a Vietnamese folder name must not crash the summary."""

@@ -167,6 +167,11 @@ class TestDescribe(unittest.TestCase):
         self.assertEqual(text, "Claude Code used 30.2% of the 5-hour limit (account total 38.0%) · "
                                "resets 20:53 · as of 20:43")
 
+    def test_without_the_lead(self):
+        window = {"kind": "five_hour", "resets_at": R5, "claude_code_pct": 30.24, "account_pct": 38.0,
+                  "as_of": iso(R5 - 600), "estimated_pct": 0.0, "current": True}
+        self.assertTrue(limits.describe(window, tz=self.TZ, lead=False).startswith("of the 5-hour limit (account"))
+
     def test_weekly_names_the_day(self):
         window = {"kind": "seven_day", "resets_at": R7, "claude_code_pct": 12.0, "account_pct": 41.0,
                   "as_of": iso(START), "estimated_pct": 0.0, "current": True}

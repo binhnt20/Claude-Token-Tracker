@@ -15,6 +15,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path, PurePath
 
+import limits
 from pricing import COST_PARTS, cost_usd, normalize_model
 from sources import data_dir, iter_transcripts, transcript_candidates, transcript_roots, warn_skipping
 
@@ -499,6 +500,11 @@ def print_summary(report: dict, today: str | None = None):
             print(f"    {name:<40} {total_tokens(stats):>10,} tokens "
                   f"({stats['requests']:,} reqs) {cost_str}")
 
+    if "limits" in report:
+        print("\n  CLAUDE CODE SHARE OF PLAN LIMITS (estimate):")
+        for line in limits.summary_lines(report["limits"]):
+            print(f"    {line}")
+
     print("=" * 60)
 
 
@@ -556,6 +562,7 @@ def main():
     print(f"Found {len(all_entries):,} assistant responses across {len(project_totals)} projects\n")
 
     report = build_report(all_entries, project_totals, date_filter)
+    report["limits"] = limits.report(all_entries)
     saved = save_report(report)
     print_summary(report)
     if saved:
