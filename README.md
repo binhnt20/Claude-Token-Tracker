@@ -4,6 +4,8 @@ Cross-platform desktop tool that scans local Claude Code transcripts and generat
 
 Transcripts are read from `~/.claude/projects/` and `~/.config/claude/projects/`, or from `<dir>/projects/` for each directory in `CLAUDE_CONFIG_DIR` (comma-separated) when that variable is set — the same places Claude Code writes to.
 
+**Windows + WSL on one computer.** Each side keeps its own history, and the tracker reads both: in WSL it adds the Windows user folder (`/mnt/c/Users/<you>`, found from the Windows `PATH` that WSL appends), on Windows it adds the home folders of every running WSL distribution (`\\wsl.localhost\<distro>\home\<user>`). A stopped distribution is not started and not counted. The two sides never share an API call, so the sum counts nothing twice. The dashboard footer lists every folder read and its calls. Reading the other side goes through a network share and is slow: on the measuring machine 1.1 GB of WSL history took 2 minutes from Windows, 3.4 GB of Windows history 2.5 minutes from WSL. To read one side only, set `CLAUDE_CONFIG_DIR` (for example `CLAUDE_CONFIG_DIR=~/.claude`), which replaces every default.
+
 ## Quick Start
 
 The tracker needs Python 3 (tested with 3.12). `pywebview` is optional: without it, `app.py` opens the dashboard in your browser.
@@ -108,7 +110,7 @@ Measured on 2026-10-13 against Claude Code's own `/cost` and `/stats`, and again
 
 - **Calls without a transcript line are not counted.** Claude Code also makes side calls (on Haiku) that it bills but does not write to a transcript, and every web search is billed on one of them. On the measuring machine `/cost` was 8.6–12.4 % above the tracker for the same sessions. So web-search fees practically never appear here: 0 of 105,551 transcript calls carried a search.
 - **The final output count is not always written.** Some subagent calls keep only the line written when the response started, so their output tokens are low. Every tool that reads transcripts shares this.
-- **One machine side at a time.** In WSL the default folders are the Linux ones. Add the Windows history with `CLAUDE_CONFIG_DIR=$HOME/.claude,/mnt/c/Users/<you>/.claude` (the two sides share no call, so the sum is safe).
+- **Only this computer.** History on another computer (a Mac, a second PC) is not in these folders, while the plan's 5-hour and weekly limits count every computer and claude.ai too. Claude Code's own `/cost`, `/stats` and `/usage` breakdown read only the side they run on.
 - **`/stats` is about twice the tracker** because it adds every transcript line without removing the repeats and uses UTC days. ccusage gives the same tokens; its cost differs where its price table lacks a dated change.
 
 ### Price overrides

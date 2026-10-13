@@ -10,7 +10,7 @@ import json
 import os
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path, PurePath
@@ -334,7 +334,10 @@ def collect_all_entries() -> tuple[list[dict], dict]:
     by_dir = defaultdict(list)
     for root in roots:
         for dir_name, jsonl_file in iter_transcripts(root):
-            by_dir[dir_name].extend(parse_transcript(jsonl_file))
+            records = parse_transcript(jsonl_file)
+            for record in records:
+                record["source"] = str(root)
+            by_dir[dir_name].extend(records)
 
     for dir_name, records in by_dir.items():
         project_name = project_display_name(dir_name, {r["cwd"] for r in records if r.get("cwd")})
@@ -358,6 +361,12 @@ def finalize_stats(stats: dict) -> dict:
         # instead of "not priced". A partially priced bucket keeps its real subtotal.
         out["cost"] = None
     return add_display(out)
+
+
+def source_counts(entries: list[dict]) -> list[dict]:
+    """Calls per transcripts folder, all dates, in the order the folders were read."""
+    counts = Counter(e["source"] for e in entries if e.get("source"))
+    return [{"folder": folder, "requests": n} for folder, n in counts.items()]
 
 
 def build_report(all_entries: list[dict], project_totals: dict, date_filter: str | None = None) -> dict:
@@ -415,6 +424,7 @@ def build_report(all_entries: list[dict], project_totals: dict, date_filter: str
         "by_date": sorted_dates,
         "by_project": sorted_projects,
         "by_date_project": sorted_date_projects,
+        "sources": source_counts(all_entries),
     }
 
 

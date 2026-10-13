@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -16,7 +17,8 @@ from unittest import mock
 
 import pricing
 import track_tokens
-from sources import iter_transcripts, transcript_candidates, transcript_roots
+from sources import (iter_transcripts, other_side_homes, running_wsl_distros, transcript_candidates,
+                     transcript_roots, windows_homes_on_path, wsl_distro_homes)
 from track_tokens import (
     TranscriptsNotFound,
     build_report,
@@ -236,6 +238,17 @@ class TestCollectAllEntries(TranscriptCase):
         self.assertEqual(stats["requests"], 1)
         self.assertEqual(stats["output_tokens"], 471)
         self.assertIn("web_search", stats["cost"])
+
+    def test_report_names_each_folder_read_with_its_calls(self):
+        """On a WSL machine the user must see that both sides were counted, and how much each one holds."""
+        self.write([assistant_line(msg_id="m1"), assistant_line(msg_id="m2")], folder="linux/projects/-work-repo")
+        self.write([assistant_line(msg_id="m3")], folder="windows/projects/C--work-repo")
+        roots = [Path(self.tmp.name) / "linux" / "projects", Path(self.tmp.name) / "windows" / "projects"]
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=roots):
+            entries, projects = collect_all_entries()
+        report = build_report(entries, projects, date_filter=None)
+        self.assertEqual(report["sources"], [{"folder": str(roots[0]), "requests": 2},
+                                             {"folder": str(roots[1]), "requests": 1}])
 
     def test_not_found_names_every_folder_looked_in(self):
         missing = [Path(self.tmp.name) / "a", Path(self.tmp.name) / "b"]
@@ -496,11 +509,11 @@ class TestSources(unittest.TestCase):
 
     def test_default_reads_both_home_dirs(self):
         legacy, xdg = self.mkdirs("home/.claude/projects", "home/.config/claude/projects")
-        self.assertEqual(transcript_roots(env={}, home=self.base / "home"), [legacy, xdg])
+        self.assertEqual(transcript_roots(env={}, home=self.base / "home", other_homes=[]), [legacy, xdg])
 
     def test_candidates_are_every_folder_looked_in(self):
         home = self.base / "home"
-        self.assertEqual(transcript_candidates(env={}, home=home),
+        self.assertEqual(transcript_candidates(env={}, home=home, other_homes=[]),
                          [home / ".claude" / "projects", home / ".config" / "claude" / "projects"])
         env = {"CLAUDE_CONFIG_DIR": f"{self.base / 'a'}, {self.base / 'b'}"}
         self.assertEqual(transcript_candidates(env=env, home=home),
@@ -508,8 +521,8 @@ class TestSources(unittest.TestCase):
 
     def test_missing_dirs_are_skipped(self):
         (legacy,) = self.mkdirs("home/.claude/projects")
-        self.assertEqual(transcript_roots(env={}, home=self.base / "home"), [legacy])
-        self.assertEqual(transcript_roots(env={}, home=self.base / "nobody"), [])
+        self.assertEqual(transcript_roots(env={}, home=self.base / "home", other_homes=[]), [legacy])
+        self.assertEqual(transcript_roots(env={}, home=self.base / "nobody", other_homes=[]), [])
 
     @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
                      "needs POSIX permissions and a non-root user")
@@ -522,7 +535,7 @@ class TestSources(unittest.TestCase):
         self.addCleanup(locked.chmod, 0o700)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            roots = transcript_roots(env={}, home=self.base / "home")
+            roots = transcript_roots(env={}, home=self.base / "home", other_homes=[])
         self.assertEqual(roots, [legacy])
         self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
 
@@ -533,7 +546,74 @@ class TestSources(unittest.TestCase):
             (self.base / "home/.config/claude").symlink_to(self.base / "home/.claude", target_is_directory=True)
         except OSError:
             self.skipTest("cannot create symlinks here")
-        self.assertEqual(transcript_roots(env={}, home=self.base / "home"), [legacy])
+        self.assertEqual(transcript_roots(env={}, home=self.base / "home", other_homes=[]), [legacy])
+
+    WINDOWS_PATH = "/usr/bin:/mnt/c/Users/me/AppData/Local/Microsoft/WindowsApps:/mnt/c/WINDOWS/system32"
+
+    def test_wsl_also_looks_in_the_windows_user_folder(self):
+        """WSL puts the Windows PATH after its own; the WindowsApps entry names the Windows user folder."""
+        home, windows = self.base / "home", Path("/mnt/c/Users/me")
+        self.assertEqual(transcript_candidates(env={"PATH": self.WINDOWS_PATH}, home=home, platform="linux"),
+                         [home / ".claude" / "projects", home / ".config" / "claude" / "projects",
+                          windows / ".claude" / "projects", windows / ".config" / "claude" / "projects"])
+
+    def test_windows_user_folders_on_path_listed_once_in_order(self):
+        path = ("/mnt/d/Users/Kim/AppData/Local/Microsoft/WindowsApps/:/bin:"
+                "/c/Users/me/AppData/Local/Microsoft/WindowsApps:/mnt/d/Users/Kim/AppData/Local/Microsoft/WindowsApps")
+        self.assertEqual(windows_homes_on_path(path), [Path("/mnt/d/Users/Kim"), Path("/c/Users/me")])
+        self.assertEqual(windows_homes_on_path("/usr/bin:/mnt/c/WINDOWS"), [])
+        self.assertEqual(windows_homes_on_path(""), [])
+
+    def test_a_windows_path_means_nothing_off_linux(self):
+        self.assertEqual(other_side_homes({"PATH": self.WINDOWS_PATH}, "darwin"), [])
+
+    def test_config_dir_also_replaces_the_other_side(self):
+        env = {"CLAUDE_CONFIG_DIR": str(self.base / "a"), "PATH": self.WINDOWS_PATH}
+        self.assertEqual(transcript_candidates(env=env, home=self.base / "home", platform="linux"),
+                         [self.base / "a" / "projects"])
+
+    def test_wsl_reads_both_sides_that_exist(self):
+        linux, windows = self.mkdirs("home/.claude/projects", "c/Users/me/.claude/projects")
+        self.assertEqual(transcript_roots(env={}, home=self.base / "home", other_homes=[self.base / "c/Users/me"]),
+                         [linux, windows])
+
+    def test_windows_looks_in_the_homes_of_running_distros(self):
+        share = self.base / "share"
+        self.mkdirs("share/Ubuntu-24.04/home/me", "share/Ubuntu-24.04/home/kim", "share/Debian/home/me")
+        homes = other_side_homes({}, "win32", list_distros=lambda: ["Ubuntu-24.04"], shares=(str(share),))
+        self.assertEqual(homes, [share / "Ubuntu-24.04/home/kim", share / "Ubuntu-24.04/home/me"])
+
+    def test_distro_homes_fall_back_to_the_older_share_name(self):
+        """\\\\wsl.localhost needs a recent Windows; \\\\wsl$ is the older name of the same share."""
+        (home,) = self.mkdirs("old/Ubuntu/home/me")
+        self.assertEqual(wsl_distro_homes("Ubuntu", shares=(str(self.base / "new"), str(self.base / "old"))), [home])
+        self.assertEqual(wsl_distro_homes("Gone", shares=(str(self.base / "old"),)), [])
+
+    def test_running_distros_parsed_from_wsl_exe_in_either_encoding(self):
+        def wsl_exe(stdout, returncode=0):
+            return lambda *args, **kwargs: subprocess.CompletedProcess(args, returncode, stdout=stdout)
+
+        utf16 = "\ufeffUbuntu-24.04\r\nDebian\r\n".encode("utf-16-le")
+        self.assertEqual(running_wsl_distros(run=wsl_exe(utf16)), ["Ubuntu-24.04", "Debian"])
+        self.assertEqual(running_wsl_distros(run=wsl_exe(b"Ubuntu-24.04\nDebian\n")), ["Ubuntu-24.04", "Debian"])
+        self.assertEqual(running_wsl_distros(run=wsl_exe(b"", returncode=1)), [])
+
+        def no_wsl(*args, **kwargs):
+            raise FileNotFoundError("wsl.exe")
+        self.assertEqual(running_wsl_distros(run=no_wsl), [])
+
+    def test_listing_running_distros_starts_none(self):
+        """`--running` lists without starting a stopped distro, and no console window flashes on Windows."""
+        calls = []
+
+        def wsl_exe(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, stdout=b"")
+        running_wsl_distros(run=wsl_exe)
+        ((args, kwargs),) = calls
+        self.assertEqual(args, ["wsl.exe", "--list", "--running", "--quiet"])
+        self.assertEqual(kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertIn("timeout", kwargs)
 
     def test_iter_transcripts_any_depth(self):
         root = self.base / "projects"
