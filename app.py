@@ -18,7 +18,7 @@ import threading
 import time
 import traceback
 import webbrowser
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Callable, Mapping
 
 import track_tokens
@@ -65,7 +65,7 @@ def _desktop_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
 
 
-def desktop_entry(launcher: Path, icon: str) -> str:
+def desktop_entry(launcher: PurePath, icon: str) -> str:
     """The .desktop file for the menu. Exec= quotes the launcher, so a home folder with a space or $ still runs.
 
     Inside the quotes the spec reserves " ` $ \\; the string escape applies on top, and % is doubled (field codes).

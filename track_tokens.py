@@ -13,7 +13,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from pricing import COST_PARTS, cost_usd, normalize_model
 from sources import iter_transcripts, transcript_candidates, transcript_roots, warn_skipping
@@ -274,7 +274,7 @@ def encode_project_dir(cwd: str) -> str:
     return re.sub(r"[^A-Za-z0-9-]", "-", cwd)
 
 
-def project_display_name(dir_name: str, cwds: Iterable[str], home: Path | None = None) -> str:
+def project_display_name(dir_name: str, cwds: Iterable[str], home: PurePath | None = None) -> str:
     """Name a project folder by the working directory it was created for.
 
     The folder name cannot be decoded ('-' stands for '/', '.', '_' and '-' alike), so the cwd recorded in the

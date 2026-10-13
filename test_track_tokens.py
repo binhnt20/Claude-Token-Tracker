@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 from datetime import timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest import mock
 
 import pricing
@@ -248,14 +248,15 @@ class TestCollectAllEntries(TranscriptCase):
 
     def test_cli_reports_not_found_on_stderr_and_exits_1(self):
         err = io.StringIO()
+        missing = Path("/nowhere/projects")
         with mock.patch.object(track_tokens, "collect_all_entries",
-                               side_effect=TranscriptsNotFound([Path("/nowhere/projects")])), \
+                               side_effect=TranscriptsNotFound([missing])), \
                 mock.patch.object(track_tokens.sys, "argv", ["track_tokens.py"]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
                 self.assertRaises(SystemExit) as caught:
             track_tokens.main()
         self.assertEqual(caught.exception.code, 1)
-        self.assertIn("/nowhere/projects", err.getvalue())
+        self.assertIn(str(missing), err.getvalue())
 
 
 class TestCliArguments(unittest.TestCase):
@@ -363,37 +364,39 @@ class TestLocalDatesAnyPlatform(unittest.TestCase):
 
 
 class TestProjectNames(unittest.TestCase):
+    HOME = PurePosixPath("/home/u")  # a POSIX home on every OS, so the cases also run on Windows
+
     def test_encoding_matches_claude_code(self):
         self.assertEqual(encode_project_dir("/home/u/code/projects-sync/fraud-6"), "-home-u-code-projects-sync-fraud-6")
         self.assertEqual(encode_project_dir("D:\\Work\\repo"), "D--Work-repo")
 
     def test_matching_cwd_wins_and_home_is_tilde(self):
         cwds = {"/home/u/code/projects-sync/fraud-6", "/home/u/code/projects-sync/fraud-6/backend"}
-        self.assertEqual(project_display_name("-home-u-code-projects-sync-fraud-6", cwds, home=Path("/home/u")),
+        self.assertEqual(project_display_name("-home-u-code-projects-sync-fraud-6", cwds, home=self.HOME),
                          "~/code/projects-sync/fraud-6")
 
     def test_windows_folder_resolves_to_its_cwd(self):
-        self.assertEqual(project_display_name("D--Work-repo", {"D:\\Work\\repo"}, home=Path("/home/u")),
+        self.assertEqual(project_display_name("D--Work-repo", {"D:\\Work\\repo"}, home=self.HOME),
                          "D:\\Work\\repo")
 
     def test_no_matching_cwd_uses_the_shortest(self):
         cwds = {"/srv/app/sub", "/srv/app"}
-        self.assertEqual(project_display_name("-srv-renamed", cwds, home=Path("/home/u")), "/srv/app")
+        self.assertEqual(project_display_name("-srv-renamed", cwds, home=self.HOME), "/srv/app")
 
     def test_no_cwd_keeps_the_folder_name(self):
-        self.assertEqual(project_display_name("-srv-app", set(), home=Path("/home/u")), "-srv-app")
+        self.assertEqual(project_display_name("-srv-app", set(), home=self.HOME), "-srv-app")
 
     def test_home_itself_is_tilde(self):
-        self.assertEqual(project_display_name("-home-u", {"/home/u"}, home=Path("/home/u")), "~")
+        self.assertEqual(project_display_name("-home-u", {"/home/u"}, home=self.HOME), "~")
 
     def test_windows_home_matches_whatever_the_case(self):
         """Windows paths ignore case: C:\\Users\\binh and C:\\Users\\Binh are the same folder."""
         name = project_display_name("C--Users-Binh-Code-Repo", {"C:\\Users\\Binh\\Code\\Repo"},
-                                    home=Path("c:\\users\\binh"))
+                                    home=PureWindowsPath("c:\\users\\binh"))
         self.assertEqual(name, "~\\Code\\Repo")
 
     def test_posix_home_stays_case_sensitive(self):
-        self.assertEqual(project_display_name("-Home-U-x", {"/Home/U/x"}, home=Path("/home/u")), "/Home/U/x")
+        self.assertEqual(project_display_name("-Home-U-x", {"/Home/U/x"}, home=self.HOME), "/Home/U/x")
 
 
 class TestReport(TranscriptCase):

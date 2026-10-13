@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import html as html_lib
 import io
 import logging
 import os
@@ -15,7 +16,7 @@ import types
 import unittest
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 import app
@@ -344,17 +345,18 @@ class TestBrowserFallback(unittest.TestCase):
 class TestNoTranscripts(unittest.TestCase):
     def test_app_explains_instead_of_closing(self):
         """The packaged app has no console: exiting on 'not found' showed nothing at all."""
-        missing = TranscriptsNotFound([Path("/home/u/.claude/projects"), Path("/home/u/<odd>/projects")])
-        with mock.patch.object(app, "scan_and_report", side_effect=missing), \
+        folders = [Path("/home/u/.claude/projects"), Path("/home/u/<odd>/projects")]
+        with mock.patch.object(app, "scan_and_report", side_effect=TranscriptsNotFound(folders)), \
                 mock.patch.object(app, "open_native_window") as window, \
                 mock.patch.object(app.sys, "argv", ["app.py"]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             app.main()
             (make_html,), _ = window.call_args
-            html = make_html()
-        self.assertIn("/home/u/.claude/projects", html)
-        self.assertIn("/home/u/&lt;odd&gt;/projects", html)
-        self.assertIn("CLAUDE_CONFIG_DIR", html)
+            page = make_html()
+        self.assertIn(str(folders[0]), page)
+        self.assertIn(html_lib.escape(str(folders[1])), page)
+        self.assertIn("&lt;odd&gt;", page)
+        self.assertIn("CLAUDE_CONFIG_DIR", page)
 
 
 class TestFallbackScan(unittest.TestCase):
@@ -401,7 +403,8 @@ class TestDesktopEntry(unittest.TestCase):
     ODD_FOLDER = 'h$o"m`e\\d x'
 
     def test_a_path_with_a_space_is_quoted(self):
-        entry = app.desktop_entry(Path("/home/a b/.local/lib/claude-token-tracker/AppRun"), "/home/a b/icon.png")
+        launcher = PurePosixPath("/home/a b/.local/lib/claude-token-tracker/AppRun")
+        entry = app.desktop_entry(launcher, "/home/a b/icon.png")
         self.assertIn('Exec="/home/a b/.local/lib/claude-token-tracker/AppRun"\n', entry)
         self.assertIn("Icon=/home/a b/icon.png\n", entry)
 
@@ -410,7 +413,7 @@ class TestDesktopEntry(unittest.TestCase):
         for path in ("/home/a b/AppRun", f"/tmp/{self.ODD_FOLDER}/AppRun", "/tmp/100% x/AppRun"):
             with self.subTest(path=path):
                 keys = GLib.KeyFile()
-                entry = app.desktop_entry(Path(path), "x").encode()
+                entry = app.desktop_entry(PurePosixPath(path), "x").encode()
                 keys.load_from_data(entry.decode(), len(entry), GLib.KeyFileFlags.NONE)
                 command = keys.get_string("Desktop Entry", "Exec").replace("%%", "%")
                 self.assertEqual(GLib.shell_parse_argv(command)[1], [path])
