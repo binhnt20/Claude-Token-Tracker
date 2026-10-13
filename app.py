@@ -161,7 +161,8 @@ STALE_PAGE_SECONDS = 24 * 60 * 60
 
 
 def _remove_stale_page_folders() -> None:
-    """Delete page folders an earlier run left behind: Cmd+Q on macOS or a kill ends the process inside webview.start().
+    """Delete page folders earlier runs left behind: every browser fallback's, and a native window's after Cmd+Q on
+    macOS or a kill ended the process inside webview.start().
 
     A day old is old enough not to be a window that is still open.
     """
@@ -244,8 +245,12 @@ def open_native_window(html: str):
 
 
 def open_in_browser(html: str):
-    """Fallback: save HTML to temp file and open in default browser."""
-    html_path = Path(tempfile.gettempdir()) / "claude_token_report.html"
+    """Fallback: open the page in the default browser, from a private folder like the native window's.
+
+    The browser reads the file after this returns, so the folder stays and ages out with the others.
+    """
+    _remove_stale_page_folders()
+    html_path = Path(tempfile.mkdtemp(prefix=PAGE_FOLDER_PREFIX)) / f"{secrets.token_urlsafe(16)}.html"
     html_path.write_text(html, encoding="utf-8")
     print(f"  Opening: {html_path}")
     webbrowser.open(html_path.as_uri())

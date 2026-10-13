@@ -12,6 +12,8 @@ import tempfile
 import time
 import types
 import unittest
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -206,6 +208,47 @@ class TestStalePages(unittest.TestCase):
         self.assertFalse(old.exists())
         self.assertTrue(running.exists())
         self.assertTrue(unrelated.exists())
+
+
+class TestBrowserFallback(unittest.TestCase):
+    """The fallback page holds every project path and cost: it gets the same private folder as the native window."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        patcher = mock.patch.object(tempfile, "tempdir", tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def open(self, html: str) -> Path:
+        with mock.patch.object(app.webbrowser, "open") as opened, contextlib.redirect_stdout(io.StringIO()):
+            app.open_in_browser(html)
+        (uri,), _ = opened.call_args
+        return Path(urllib.request.url2pathname(urllib.parse.urlparse(uri).path))
+
+    def test_page_is_in_a_private_folder_with_a_random_name(self):
+        pages = [self.open("<p>hi</p>") for _ in range(2)]
+        self.assertNotEqual(pages[0], pages[1])
+        for page in pages:
+            self.assertEqual(page.read_text(encoding="utf-8"), "<p>hi</p>")
+            self.assertEqual(page.parent.parent, self.base)
+            self.assertTrue(page.parent.name.startswith(app.PAGE_FOLDER_PREFIX))
+            if os.name == "posix":
+                self.assertEqual(page.parent.stat().st_mode & 0o077, 0)
+
+    def test_a_name_someone_else_holds_does_not_stop_it(self):
+        """In a shared /tmp the old fixed name could belong to another user: writing it raised and nothing opened."""
+        (self.base / "claude_token_report.html").mkdir()
+        self.assertTrue(self.open("<p>hi</p>").is_file())
+
+    def test_old_fallback_pages_age_out(self):
+        old = self.base / (app.PAGE_FOLDER_PREFIX + "old")
+        old.mkdir()
+        then = time.time() - 25 * 3600
+        os.utime(old, (then, then))
+        self.open("<p>hi</p>")
+        self.assertFalse(old.exists())
 
 
 class TestNoTranscripts(unittest.TestCase):
