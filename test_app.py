@@ -35,7 +35,17 @@ class FakeWebview(types.ModuleType):
         self.loaded = Path(url).read_text(encoding="utf-8") if url else None
 
 
+def allow_native_window(test: unittest.TestCase) -> None:
+    """The fake window opens wherever the tests run, display or not."""
+    patcher = mock.patch.object(app, "native_window_blocker", return_value=None)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+
+
 class TestNativeWindow(unittest.TestCase):
+    def setUp(self):
+        allow_native_window(self)
+
     def open(self, html: str) -> FakeWebview:
         fake = FakeWebview()
         with mock.patch.dict(sys.modules, {"webview": fake}):
@@ -93,10 +103,47 @@ class TestNativeWindow(unittest.TestCase):
             self.assertGreaterEqual(len(name), 20)
 
 
+class TestNativeWindowBlocker(unittest.TestCase):
+    """Qt aborts the whole process in C++ when it cannot open a window, so no except clause can reach the fallback."""
+
+    def blocker(self, env: dict, lib: str | None = "libxcb-cursor.so.0", platform: str = "linux") -> str | None:
+        return app.native_window_blocker(platform, env, lambda name: lib)
+
+    def test_no_display_means_no_native_window(self):
+        self.assertIn("no display", self.blocker({}))
+
+    def test_x11_without_xcb_cursor_names_the_package(self):
+        self.assertIn("sudo apt install libxcb-cursor0", self.blocker({"DISPLAY": ":0"}, lib=None))
+
+    def test_x11_with_xcb_cursor_opens(self):
+        self.assertIsNone(self.blocker({"DISPLAY": ":0"}))
+
+    def test_wayland_does_not_need_xcb_cursor(self):
+        self.assertIsNone(self.blocker({"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}, lib=None))
+
+    def test_a_platform_the_user_chose_is_respected(self):
+        self.assertIsNone(self.blocker({"QT_QPA_PLATFORM": "offscreen"}, lib=None))
+
+    def test_only_linux_is_checked(self):
+        for platform in ("darwin", "win32"):
+            self.assertIsNone(self.blocker({}, lib=None, platform=platform))
+
+    def test_a_blocked_window_raises_before_making_a_folder(self):
+        fake = FakeWebview()
+        with mock.patch.dict(sys.modules, {"webview": fake}), \
+                mock.patch.object(app, "native_window_blocker", return_value="no display"), \
+                mock.patch.object(app.tempfile, "mkdtemp") as mkdtemp, \
+                self.assertRaisesRegex(RuntimeError, "no display"):
+            app.open_native_window("<p>hi</p>")
+        mkdtemp.assert_not_called()
+        self.assertEqual(fake.windows, [])
+
+
 class TestStalePages(unittest.TestCase):
     """Cmd+Q on macOS ends the process inside webview.start(), so its folder outlives it; the next launch removes it."""
 
     def setUp(self):
+        allow_native_window(self)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.base = Path(tmp.name)

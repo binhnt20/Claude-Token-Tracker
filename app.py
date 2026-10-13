@@ -5,6 +5,7 @@ Scans local Claude Code transcripts and shows an interactive dashboard in a nati
 """
 from __future__ import annotations
 
+import ctypes.util
 import html as html_lib
 import os
 import secrets
@@ -14,6 +15,7 @@ import tempfile
 import time
 import webbrowser
 from pathlib import Path
+from typing import Callable, Mapping
 
 import track_tokens
 from track_tokens import TranscriptsNotFound, build_report, print_summary, save_report
@@ -171,6 +173,21 @@ def _remove_stale_page_folders() -> None:
             pass
 
 
+def native_window_blocker(platform: str, env: Mapping[str, str], find_library: Callable[[str], str | None]) -> str | None:
+    """Why Qt cannot open a window here, or None. Qt aborts the process when it fails, so it must not be tried.
+
+    A QT_QPA_PLATFORM the user set is theirs to answer for. Wayland needs no extra library; X11 needs libxcb-cursor,
+    which Ubuntu does not install by default and PySide6 does not bundle.
+    """
+    if not platform.startswith("linux") or env.get("QT_QPA_PLATFORM"):
+        return None
+    if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+        return "no display: DISPLAY and WAYLAND_DISPLAY are not set"
+    if not env.get("WAYLAND_DISPLAY") and find_library("xcb-cursor") is None:
+        return "Qt needs libxcb-cursor0 to open a window on X11: sudo apt install libxcb-cursor0"
+    return None
+
+
 def open_native_window(html: str):
     """Open dashboard in a native OS window using pywebview.
 
@@ -181,6 +198,9 @@ def open_native_window(html: str):
     """
     import webview
 
+    reason = native_window_blocker(sys.platform, os.environ, ctypes.util.find_library)
+    if reason:
+        raise RuntimeError(reason)
     if sys.platform == "darwin":
         _setup_macos_dock()
 
