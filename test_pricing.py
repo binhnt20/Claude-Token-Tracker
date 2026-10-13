@@ -101,6 +101,11 @@ class TestRatesFor(unittest.TestCase):
         self.assertEqual(rates_for("claude-opus-4-1", NOW), OPUS_41)
         self.assertEqual(rates_for("claude-haiku-3-5", NOW), HAIKU_35)
 
+    def test_haiku_35_real_id_is_priced(self):
+        """The API id puts the version first: claude-3-5-haiku-20241022."""
+        self.assertEqual(normalize_model("claude-3-5-haiku-20241022"), "claude-haiku-3-5")
+        self.assertEqual(rates_for("claude-3-5-haiku-20241022", NOW), HAIKU_35)
+
 
 class TestCurrentModels(unittest.TestCase):
     def test_every_published_model_is_priced(self):

@@ -154,10 +154,15 @@ def load_overrides(path: Path) -> tuple[float, dict[str, dict]]:
     return multiplier, overrides
 
 
+# Claude 3.x ids put the version before the family name; map them onto the family-first rows above.
+LEGACY_IDS = {"claude-3-5-haiku": "claude-haiku-3-5"}
+
+
 def normalize_model(model: str) -> str:
     """Strip context-window and date suffixes: 'claude-haiku-4-5-20251001' -> 'claude-haiku-4-5'."""
     stripped = re.sub(r"\[.*?\]$", "", model)
-    return re.sub(r"-\d{8}$", "", stripped)
+    stripped = re.sub(r"-\d{8}$", "", stripped)
+    return LEGACY_IDS.get(stripped, stripped)
 
 
 def rates_for(model: str, date: str, prompt_tokens: int = 0) -> dict | None:
