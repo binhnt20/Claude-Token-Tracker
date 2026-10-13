@@ -11,29 +11,39 @@ from pathlib import Path
 from track_tokens import parse_transcript
 
 from pricing import (
-    FABLE,
+    COST_PARTS,
     HAIKU_35,
     HAIKU_45,
-    OPUS,
     OPUS_41,
-    SONNET,
-    SONNET_5_INTRO,
+    PRICING,
     cost_usd,
     normalize_model,
+    price_multiplier,
     rates_for,
 )
 
-TIERS = {
-    "OPUS": OPUS,
-    "FABLE": FABLE,
-    "SONNET": SONNET,
-    "SONNET_5_INTRO": SONNET_5_INTRO,
-    "HAIKU_45": HAIKU_45,
-    "HAIKU_35": HAIKU_35,
-    "OPUS_41": OPUS_41,
-}
-
 TODAY = "2026-07-17"
+NOW = "2026-10-13"
+
+# Every model id the pricing page listed on 2026-10-13, retired ones included: old transcripts still name them.
+PUBLISHED_MODELS = (
+    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-opus-4-5", "claude-opus-4-1", "claude-opus-4",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4",
+    "claude-haiku-5-5", "claude-haiku-4-5", "claude-haiku-3-5",
+)
+
+
+def all_rate_cards():
+    """Yield (label, effective_from, rates) for every rate dict in PRICING, prompt tiers included."""
+    for model, windows in PRICING.items():
+        for effective_from, _to, rates in windows:
+            if isinstance(rates, dict):
+                yield model, effective_from, rates
+            else:
+                for limit, tier_rates in rates:
+                    yield f"{model} (prompt <= {limit})", effective_from, tier_rates
 
 
 class TestNormalizeModel(unittest.TestCase):
@@ -69,37 +79,105 @@ class TestRatesFor(unittest.TestCase):
     def test_haiku_date_suffix_resolves(self):
         self.assertEqual(rates_for("claude-haiku-4-5-20251001", TODAY), HAIKU_45)
 
-
-class TestSonnet5PriceWindow(unittest.TestCase):
-    def test_sonnet5_before_intro_end(self):
-        self.assertEqual(rates_for("claude-sonnet-5", "2026-07-17"), SONNET_5_INTRO)
-
-    def test_sonnet5_intro_boundary(self):
-        self.assertEqual(rates_for("claude-sonnet-5", "2026-08-31"), SONNET_5_INTRO)
-        self.assertEqual(rates_for("claude-sonnet-5", "2026-09-01"), SONNET)
-
-    def test_sonnet5_windows_cover_every_date(self):
-        for date in ("2024-01-01", "2026-08-31", "2026-09-01", "2099-12-31"):
-            self.assertIsNotNone(rates_for("claude-sonnet-5", date), date)
+    def test_retired_models_keep_their_rows(self):
+        self.assertEqual(rates_for("claude-opus-4-1", NOW), OPUS_41)
+        self.assertEqual(rates_for("claude-haiku-3-5", NOW), HAIKU_35)
 
 
-class TestTierRatios(unittest.TestCase):
+class TestCurrentModels(unittest.TestCase):
+    def test_every_published_model_is_priced(self):
+        for model in PUBLISHED_MODELS:
+            self.assertIsNotNone(rates_for(model, NOW), model)
+
+    def test_opus55_rates(self):
+        r = rates_for("claude-opus-5-5", NOW)
+        self.assertEqual((r["input"], r["output"], r["cache_read"]), (4, 20, 0.20))
+
+    def test_fable51_cache_read(self):
+        self.assertEqual(rates_for("claude-fable-5-1", NOW)["cache_read"], 0.25)
+
+
+class TestPriceWindows(unittest.TestCase):
+    def test_sonnet5_stays_at_intro_price(self):
+        """The $3/$15 step planned for 2026-09-01 was cancelled on 2026-08-10."""
+        for date in ("2026-07-17", "2026-09-01", "2099-01-01"):
+            self.assertEqual(rates_for("claude-sonnet-5", date)["input"], 2, date)
+
+    def test_sonnet55_cache_read_cut_on_2026_10_07(self):
+        self.assertEqual(rates_for("claude-sonnet-5-5", "2026-10-06")["cache_read"], 0.20)
+        self.assertEqual(rates_for("claude-sonnet-5-5", "2026-10-07")["cache_read"], 0.10)
+
+    def test_windows_cover_every_date(self):
+        for model in PUBLISHED_MODELS:
+            for date in ("2024-01-01", "2026-10-06", "2026-10-07", "2099-12-31"):
+                self.assertIsNotNone(rates_for(model, date), f"{model} {date}")
+
+
+class TestPublishedRules(unittest.TestCase):
+    """The pricing page derives writes from input everywhere, and reads too except in its footnotes."""
+
+    READ_EXCEPTIONS = {
+        "claude-fable-5-1": 0.025,
+        "claude-mythos-5-1": 0.025,
+        "claude-opus-5-5": 0.05,
+    }
+
+    def _read_ratio(self, label, effective_from):
+        model = label.split(" ")[0]
+        if model == "claude-sonnet-5-5" and effective_from == "2026-10-07":
+            return 0.05
+        return self.READ_EXCEPTIONS.get(model, 0.1)
+
     def test_cache_5m_is_1_25x_input(self):
-        for name, t in TIERS.items():
-            self.assertAlmostEqual(t["cache_write_5m"], t["input"] * 1.25, msg=name)
+        for label, _from, r in all_rate_cards():
+            self.assertAlmostEqual(r["cache_write_5m"], r["input"] * 1.25, msg=label)
 
-    def test_cache_1h_double_base_input(self):
-        for name, t in TIERS.items():
-            self.assertAlmostEqual(t["cache_write_1h"], t["input"] * 2, msg=name)
+    def test_cache_1h_is_2x_input(self):
+        for label, _from, r in all_rate_cards():
+            self.assertAlmostEqual(r["cache_write_1h"], r["input"] * 2, msg=label)
 
-    def test_cache_read_is_0_1x_input(self):
-        for name, t in TIERS.items():
-            self.assertAlmostEqual(t["cache_read"], t["input"] * 0.1, msg=name)
+    def test_cache_read_ratio(self):
+        for label, effective_from, r in all_rate_cards():
+            ratio = self._read_ratio(label, effective_from)
+            self.assertAlmostEqual(r["cache_read"], r["input"] * ratio, msg=label)
 
     def test_cache_1h_costs_more_than_5m(self):
         """The bug this project fixes: 1h writes billed at 5m rates understates cost."""
-        for name, t in TIERS.items():
-            self.assertGreater(t["cache_write_1h"], t["cache_write_5m"], msg=name)
+        for label, _from, r in all_rate_cards():
+            self.assertGreater(r["cache_write_1h"], r["cache_write_5m"], msg=label)
+
+
+class TestPromptTiers(unittest.TestCase):
+    def test_haiku55_low_card_up_to_100k(self):
+        self.assertEqual(rates_for("claude-haiku-5-5", NOW, 100_000)["input"], 0.10)
+
+    def test_haiku55_high_card_over_100k(self):
+        self.assertEqual(rates_for("claude-haiku-5-5", NOW, 100_001)["input"], 0.50)
+
+    def test_haiku55_default_prompt_is_low_card(self):
+        self.assertEqual(rates_for("claude-haiku-5-5", NOW)["output"], 0.50)
+
+
+class TestModifiers(unittest.TestCase):
+    def test_fast_doubles_opus55(self):
+        self.assertEqual(price_multiplier("claude-opus-5-5", "fast", None), 2)
+
+    def test_fast_without_verified_multiplier_is_unpriced(self):
+        self.assertIsNone(price_multiplier("claude-opus-4-6", "fast", None))
+        self.assertIsNone(price_multiplier("claude-sonnet-5-5", "fast", None))
+
+    def test_us_inference_is_1_1x(self):
+        self.assertEqual(price_multiplier("claude-opus-5-5", "standard", "us"), 1.1)
+
+    def test_modifiers_stack(self):
+        self.assertAlmostEqual(price_multiplier("claude-opus-5-5", "fast", "us"), 2.2)
+
+    def test_us_inference_only_from_claude_46(self):
+        self.assertEqual(price_multiplier("claude-haiku-4-5", None, "us"), 1)
+
+    def test_other_geos_are_standard(self):
+        self.assertEqual(price_multiplier("claude-opus-5-5", None, "global"), 1)
+        self.assertEqual(price_multiplier("claude-opus-5-5", None, "not_available"), 1)
 
 
 class TestCostUsd(unittest.TestCase):
@@ -113,18 +191,18 @@ class TestCostUsd(unittest.TestCase):
         }
 
     def test_cost_usd_math(self):
-        # opus-4-8 @ 1M each: 5 + 25 + 6.25 + 10 + 0.50 = 46.75
-        cost = cost_usd(self._one_m_each(), "claude-opus-4-8", TODAY)
-        self.assertAlmostEqual(cost["input"], 5)
-        self.assertAlmostEqual(cost["output"], 25)
-        self.assertAlmostEqual(cost["cache_write_5m"], 6.25)
-        self.assertAlmostEqual(cost["cache_write_1h"], 10)
-        self.assertAlmostEqual(cost["cache_read"], 0.50)
-        self.assertAlmostEqual(cost["total"], 46.75)
+        # opus-5-5 @ 1M each: 4 + 20 + 5 + 8 + 0.20 = 37.20
+        cost = cost_usd(self._one_m_each(), "claude-opus-5-5", NOW)
+        self.assertAlmostEqual(cost["input"], 4)
+        self.assertAlmostEqual(cost["output"], 20)
+        self.assertAlmostEqual(cost["cache_write_5m"], 5)
+        self.assertAlmostEqual(cost["cache_write_1h"], 8)
+        self.assertAlmostEqual(cost["cache_read"], 0.20)
+        self.assertAlmostEqual(cost["total"], 37.20)
 
     def test_cost_usd_total_is_sum_of_parts(self):
         cost = cost_usd(self._one_m_each(), "claude-fable-5", TODAY)
-        parts = sum(v for k, v in cost.items() if k != "total")
+        parts = sum(cost[k] for k in COST_PARTS)
         self.assertAlmostEqual(cost["total"], parts)
 
     def test_cost_usd_unknown_returns_none(self):
@@ -143,10 +221,22 @@ class TestCostUsd(unittest.TestCase):
         )
         self.assertEqual(cost["total"], 0.0)
 
-    def test_cost_usd_honours_price_window(self):
-        stats = {"input_tokens": 1_000_000}
-        self.assertAlmostEqual(cost_usd(stats, "claude-sonnet-5", "2026-08-31")["input"], 2)
-        self.assertAlmostEqual(cost_usd(stats, "claude-sonnet-5", "2026-09-01")["input"], 3)
+    def test_haiku55_tier_uses_whole_prompt(self):
+        """Cache reads count toward the 100k threshold, so 60k fresh + 50k cached is a long prompt."""
+        cost = cost_usd({"input_tokens": 60_000, "cache_read_input_tokens": 50_000}, "claude-haiku-5-5", NOW)
+        self.assertAlmostEqual(cost["input"], 60_000 * 0.50 / 1e6)
+
+    def test_fast_doubles_every_part(self):
+        cost = cost_usd({"output_tokens": 1_000_000, "speed": "fast"}, "claude-opus-5-5", NOW)
+        self.assertAlmostEqual(cost["output"], 40)
+
+    def test_fast_on_unverified_model_is_unpriced(self):
+        self.assertIsNone(cost_usd({"output_tokens": 1, "speed": "fast"}, "claude-opus-4-6", NOW))
+
+    def test_web_search_billed_per_request(self):
+        cost = cost_usd({"web_search_requests": 50}, "claude-opus-5-5", NOW)
+        self.assertAlmostEqual(cost["web_search"], 0.50)
+        self.assertAlmostEqual(cost["total"], 0.50)
 
 
 class TestParseTranscript(unittest.TestCase):
