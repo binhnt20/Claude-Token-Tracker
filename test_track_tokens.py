@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -137,16 +139,30 @@ class TestRecordFields(TranscriptCase):
         self.assertAlmostEqual(record["cost"]["web_search"], 0.03)
 
     @unittest.skipUnless(hasattr(time, "tzset"), "time.tzset is POSIX only")
+    def test_price_window_test_restores_the_zone(self):
+        """A test that changes TZ must leave the process zone as it found it, or later tests depend on order."""
+        with mock.patch.dict(os.environ, {"TZ": "America/New_York"}):
+            time.tzset()
+            before = time.strftime("%z", time.localtime(1_800_000_000))
+            result = unittest.TestResult()
+            type(self)("test_price_window_uses_utc_date").run(result)
+            after = time.strftime("%z", time.localtime(1_800_000_000))
+        time.tzset()
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual(after, before)
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "time.tzset is POSIX only")
     def test_price_window_uses_utc_date(self):
         """20:00 UTC on 10-06 is 10-07 in Ho Chi Minh City; the 10-06 price still applies."""
-        with mock.patch.dict(os.environ, {"TZ": "Asia/Ho_Chi_Minh"}):
-            time.tzset()
-            try:
-                record = parse_transcript(self.write([assistant_line(
-                    model="claude-sonnet-5-5", input_tokens=0, output=0, cache_read=1_000_000,
-                    timestamp="2026-10-06T20:00:00Z")]))[0]
-            finally:
-                time.tzset()
+        patcher = mock.patch.dict(os.environ, {"TZ": "Asia/Ho_Chi_Minh"})
+        patcher.start()
+        # Cleanups run last-in first-out: restore TZ, then re-read it.
+        self.addCleanup(time.tzset)
+        self.addCleanup(patcher.stop)
+        time.tzset()
+        record = parse_transcript(self.write([assistant_line(
+            model="claude-sonnet-5-5", input_tokens=0, output=0, cache_read=1_000_000,
+            timestamp="2026-10-06T20:00:00Z")]))[0]
         self.assertAlmostEqual(record["cost"]["cache_read"], 0.20)
 
 
@@ -243,6 +259,20 @@ class TestReport(TranscriptCase):
         self.assertIsNotNone(report["by_project"]["/srv/alpha"]["cost"])
 
 
+class TestPrintSummary(TranscriptCase):
+    def test_non_ascii_project_on_a_cp1252_stdout(self):
+        """A redirected Windows stdout is cp1252; a Vietnamese folder name must not crash the summary."""
+        self.write([assistant_line(cwd="D:\\Dự án\\repo")], folder="D--D--n-repo")
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[Path(self.tmp.name)]):
+            report = build_report(*collect_all_entries())
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="cp1252")
+        with contextlib.redirect_stdout(stream):
+            track_tokens.print_summary(report)
+        stream.flush()
+        self.assertIn(b"D:\\D? \xe1n\\repo", raw.getvalue())
+
+
 class TestSources(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -273,6 +303,21 @@ class TestSources(unittest.TestCase):
         (legacy,) = self.mkdirs("home/.claude/projects")
         self.assertEqual(transcript_roots(env={}, home=self.base / "home"), [legacy])
         self.assertEqual(transcript_roots(env={}, home=self.base / "nobody"), [])
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "needs POSIX permissions and a non-root user")
+    def test_unreachable_root_is_skipped_with_a_warning(self):
+        """A root-owned ~/.config/claude (after `sudo claude`) must not stop the scan of ~/.claude."""
+        (legacy,) = self.mkdirs("home/.claude/projects")
+        locked = self.base / "home/.config/claude"
+        locked.mkdir(parents=True)
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            roots = transcript_roots(env={}, home=self.base / "home")
+        self.assertEqual(roots, [legacy])
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
 
     def test_symlinked_duplicate_listed_once(self):
         (legacy,) = self.mkdirs("home/.claude/projects")

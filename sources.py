@@ -4,8 +4,21 @@
 from __future__ import annotations
 
 import os
+import stat
+import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+
+
+def _is_dir(path: Path) -> bool:
+    """Like Path.is_dir(), but a folder that exists and cannot be reached is skipped with a warning, not raised."""
+    try:
+        return stat.S_ISDIR(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        print(f"claude-token-tracker: skipping {path} ({exc.strerror or exc})", file=sys.stderr)
+        return False
 
 
 def transcript_roots(env: Mapping[str, str] | None = None, home: Path | None = None) -> list[Path]:
@@ -25,7 +38,7 @@ def transcript_roots(env: Mapping[str, str] | None = None, home: Path | None = N
 
     roots, seen = [], set()
     for candidate in candidates:
-        if not candidate.is_dir():
+        if not _is_dir(candidate):
             continue
         real = candidate.resolve()
         if real in seen:

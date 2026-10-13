@@ -379,6 +379,9 @@ def build_report(all_entries: list[dict], project_totals: dict, date_filter: str
 
 def print_summary(report: dict):
     """Print a human-readable summary to stdout."""
+    # Project names are paths; a redirected Windows stdout is cp1252 and would raise on most non-Latin names.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     s = report["summary"]
     print("=" * 60)
     print("  CLAUDE CODE TOKEN USAGE REPORT")

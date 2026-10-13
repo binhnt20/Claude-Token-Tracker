@@ -122,10 +122,11 @@ def _parse_override_row(path: Path, model: str, row) -> dict | None:
 
 def load_overrides(path: Path) -> tuple[float, dict[str, dict]]:
     """Read the user price file: (multiplier, model -> rates). A missing file gives (1.0, {})."""
-    if not path.exists():
-        return 1.0, {}
+    # No exists() check: before Python 3.13 it raises when a parent folder cannot be searched.
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return 1.0, {}
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         _warn(path, f"ignored ({exc})")
         return 1.0, {}
@@ -185,6 +186,8 @@ def price_multiplier(model: str, speed: str | None, inference_geo: str | None) -
         if model not in FAST_MULTIPLIER:
             return None
         multiplier *= FAST_MULTIPLIER[model]
+    elif speed not in (None, "standard"):
+        return None
     if inference_geo == "us" and model in US_INFERENCE_MODELS:
         multiplier *= US_INFERENCE_MULTIPLIER
     return multiplier

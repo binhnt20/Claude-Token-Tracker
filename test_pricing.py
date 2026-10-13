@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -192,6 +193,15 @@ class TestModifiers(unittest.TestCase):
     def test_us_inference_only_from_claude_46(self):
         self.assertEqual(price_multiplier("claude-haiku-4-5", None, "us"), 1)
 
+    def test_unknown_speed_is_unpriced(self):
+        """A speed tier this table does not know is a price we would be guessing."""
+        self.assertIsNone(price_multiplier("claude-opus-5-5", "priority", None))
+        self.assertIsNone(cost_usd({"input_tokens": 1_000_000, "speed": "priority"}, "claude-opus-5-5", NOW))
+
+    def test_known_speeds_are_standard(self):
+        self.assertEqual(price_multiplier("claude-opus-5-5", None, None), 1)
+        self.assertEqual(price_multiplier("claude-opus-5-5", "standard", None), 1)
+
     def test_other_geos_are_standard(self):
         self.assertEqual(price_multiplier("claude-opus-5-5", None, "global"), 1)
         self.assertEqual(price_multiplier("claude-opus-5-5", None, "not_available"), 1)
@@ -322,6 +332,23 @@ class TestOverrides(unittest.TestCase):
         result, err = self._load('{"overrides": {')
         self.assertEqual(result, (1.0, {}))
         self.assertEqual(len(err.strip().splitlines()), 1)
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "needs POSIX permissions and a non-root user")
+    def test_unreachable_folder_warns_once(self):
+        """Path.exists() raises PermissionError before Python 3.13 when the parent cannot be searched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            locked = Path(tmp) / "locked"
+            locked.mkdir()
+            locked.chmod(0)
+            try:
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    result = load_overrides(locked / "pricing.json")
+            finally:
+                locked.chmod(0o700)
+        self.assertEqual(result, (1.0, {}))
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
 
     def test_unreadable_file_warns_once(self):
         with tempfile.TemporaryDirectory() as tmp:
