@@ -5,14 +5,16 @@ Scans local Claude Code transcripts and shows an interactive dashboard in a nati
 """
 from __future__ import annotations
 
+import html as html_lib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import webbrowser
 from pathlib import Path
 
-from track_tokens import collect_all_entries, build_report, print_summary, OUTPUT_FILE
+from track_tokens import TranscriptsNotFound, collect_all_entries, build_report, print_summary, OUTPUT_FILE
 from dashboard import generate_html, ASSETS_DIR
 
 APP_NAME = "Claude Token Tracker"
@@ -142,26 +144,47 @@ def scan_and_report() -> tuple[dict, str]:
     return report, generate_html(report)
 
 
+def not_found_html(exc: TranscriptsNotFound) -> str:
+    """A page that says where transcripts were looked for: the packaged app has no console to print it to."""
+    folders = "".join(f"<li><code>{html_lib.escape(str(c))}</code></li>" for c in exc.candidates)
+    return ("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Claude Code Token Usage</title>"
+            "<style>body{font-family:system-ui,sans-serif;margin:40px;line-height:1.6}</style></head><body>"
+            "<h1>No Claude Code transcripts found</h1><p>Looked in:</p>"
+            f"<ul>{folders}</ul><p>Use Claude Code once, or set <code>CLAUDE_CONFIG_DIR</code> to the folder it uses, "
+            "then open this app again.</p></body></html>")
+
+
 def open_native_window(html: str):
-    """Open dashboard in a native OS window using pywebview."""
+    """Open dashboard in a native OS window using pywebview.
+
+    The page is loaded from a file, not passed as html=: that goes through Qt setHtml / WebView2 NavigateToString,
+    which show a blank window once the page passes 2 MB. pywebview serves a plain path's folder on 127.0.0.1, so the
+    page gets a private folder of its own, removed when the window closes.
+    """
     import webview
 
     if sys.platform == "darwin":
         _setup_macos_dock()
 
-    webview.create_window(
-        APP_NAME,
-        html=html,
-        width=1200,
-        height=800,
-        min_size=(800, 600),
-    )
-    # On Linux we ship the self-contained Qt/QtWebEngine backend; force it so
-    # pywebview does not fall back to the system GTK/WebKit stack.
-    if sys.platform.startswith("linux"):
-        webview.start(gui="qt")
-    else:
-        webview.start()
+    folder = Path(tempfile.mkdtemp(prefix="claude-token-tracker-"))
+    try:
+        page = folder / "index.html"
+        page.write_text(html, encoding="utf-8")
+        webview.create_window(
+            APP_NAME,
+            url=str(page),
+            width=1200,
+            height=800,
+            min_size=(800, 600),
+        )
+        # On Linux we ship the self-contained Qt/QtWebEngine backend; force it so
+        # pywebview does not fall back to the system GTK/WebKit stack.
+        if sys.platform.startswith("linux"):
+            webview.start(gui="qt")
+        else:
+            webview.start()
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def open_in_browser(html: str):
@@ -188,7 +211,11 @@ def main():
         _uninstall_desktop_entry()
         sys.exit(0)
 
-    _report, html = scan_and_report()
+    try:
+        _report, html = scan_and_report()
+    except TranscriptsNotFound as exc:
+        print(exc, file=sys.stderr)
+        html = not_found_html(exc)
 
     try:
         open_native_window(html)
