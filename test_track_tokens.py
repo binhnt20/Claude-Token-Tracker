@@ -286,6 +286,14 @@ class TestCliArguments(unittest.TestCase):
             self.assertIn("YYYY-MM-DD", out)
             collect.assert_not_called()
 
+    def test_usage_names_the_python_command_of_the_os(self):
+        """On Windows `python3` opens the Microsoft Store stub; the python.org installer gives `python` (WIN-2)."""
+        self.assertIn("Usage: python track_tokens.py", track_tokens.usage_text("win32"))
+        for platform in ("linux", "darwin"):
+            self.assertIn("Usage: python3 track_tokens.py", track_tokens.usage_text(platform))
+        _code, out, _err, _collect, _report = self.run_cli("--help")
+        self.assertEqual(out.strip(), track_tokens.usage_text().strip())
+
     def test_a_date_that_does_not_exist_exits_2_without_scanning(self):
         for arg in ("2026-13-45", "2026-02-30", "tomorrow", "--today"):
             code, _out, err, collect, _report = self.run_cli(arg)

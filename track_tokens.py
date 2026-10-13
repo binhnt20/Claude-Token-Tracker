@@ -511,9 +511,16 @@ def save_report(report: dict) -> Path | None:
     return OUTPUT_FILE
 
 
-USAGE = """Usage: python3 track_tokens.py [today | yesterday | YYYY-MM-DD]
-  No argument: all-time report. Days are this computer's local days.
-  Prints a summary and writes token_usage.json next to this script."""
+def python_command(platform: str | None = None) -> str:
+    """The command that starts Python 3. On Windows `python3` opens the Microsoft Store stub; python.org installs
+    `python`."""
+    return "python" if (sys.platform if platform is None else platform) == "win32" else "python3"
+
+
+def usage_text(platform: str | None = None) -> str:
+    return (f"Usage: {python_command(platform)} track_tokens.py [today | yesterday | YYYY-MM-DD]\n"
+            "  No argument: all-time report. Days are this computer's local days.\n"
+            "  Prints a summary and writes token_usage.json next to this script.")
 
 
 def main():
@@ -523,7 +530,7 @@ def main():
         arg = sys.argv[1]
         # Days are the user's local days, the same buckets the report uses.
         if arg in ("-h", "--help"):
-            print(USAGE)
+            print(usage_text())
             sys.exit(0)
         if arg == "today":
             date_filter = datetime.now().astimezone().strftime("%Y-%m-%d")
@@ -533,7 +540,7 @@ def main():
             try:
                 date_filter = datetime.strptime(arg, "%Y-%m-%d").date().isoformat()
             except ValueError:
-                print(f"Not a date: {arg!r}\n{USAGE}", file=sys.stderr)
+                print(f"Not a date: {arg!r}\n{usage_text()}", file=sys.stderr)
                 sys.exit(2)
 
     print("Scanning Claude Code transcripts...")

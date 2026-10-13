@@ -136,6 +136,12 @@ class TestNativeWindow(unittest.TestCase):
         self.assertIn("ValueError: bad &lt;line&gt;", fake.loaded)
         self.assertIn("Traceback", err.getvalue())
 
+    def test_the_error_page_names_the_python_command_of_the_os(self):
+        """On Windows `python3` opens the Microsoft Store stub (WIN-2)."""
+        for platform, command in (("win32", "python track_tokens.py"), ("linux", "python3 track_tokens.py")):
+            with self.subTest(platform=platform), mock.patch.object(track_tokens.sys, "platform", platform):
+                self.assertIn(f"<code>{command}</code>", app.error_html(ValueError("x")))
+
     def test_closing_the_window_mid_scan_does_not_wait_for_the_scan(self):
         release = threading.Event()
         self.addCleanup(release.set)

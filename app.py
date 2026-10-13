@@ -177,7 +177,8 @@ def error_html(exc: Exception) -> str:
             "<style>body{font-family:system-ui,sans-serif;margin:40px;line-height:1.6}</style></head><body>"
             "<h1>Could not build the dashboard</h1>"
             f"<pre>{html_lib.escape(f'{type(exc).__name__}: {exc}')}</pre>"
-            "<p>Run <code>python3 track_tokens.py</code> in a terminal to see the full error.</p></body></html>")
+            f"<p>Run <code>{track_tokens.python_command()} track_tokens.py</code> in a terminal "
+            "to see the full error.</p></body></html>")
 
 
 # Same colours as the dashboard, so the switch to it does not flash.
