@@ -3,10 +3,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import pricing
 
 from track_tokens import parse_transcript
 
@@ -17,6 +22,7 @@ from pricing import (
     OPUS_41,
     PRICING,
     cost_usd,
+    load_overrides,
     normalize_model,
     price_multiplier,
     rates_for,
@@ -24,6 +30,17 @@ from pricing import (
 
 TODAY = "2026-07-17"
 NOW = "2026-10-13"
+
+# A real ~/.config/claude-token-tracker/pricing.json on the test machine must not change the prices tested here.
+_NO_USER_FILE = mock.patch.multiple(pricing, _MULTIPLIER=1.0, _OVERRIDES={})
+
+
+def setUpModule():
+    _NO_USER_FILE.start()
+
+
+def tearDownModule():
+    _NO_USER_FILE.stop()
 
 # Every model id the pricing page listed on 2026-10-13, retired ones included: old transcripts still name them.
 PUBLISHED_MODELS = (
@@ -237,6 +254,109 @@ class TestCostUsd(unittest.TestCase):
         cost = cost_usd({"web_search_requests": 50}, "claude-opus-5-5", NOW)
         self.assertAlmostEqual(cost["web_search"], 0.50)
         self.assertAlmostEqual(cost["total"], 0.50)
+
+
+class TestOverrides(unittest.TestCase):
+    """The user file at OVERRIDES_PATH: per-model rows plus a global multiplier."""
+
+    def _load(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pricing.json"
+            path.write_text(text, encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                result = load_overrides(path)
+        return result, err.getvalue()
+
+    def _active(self, multiplier, overrides):
+        return mock.patch.multiple(pricing, _MULTIPLIER=multiplier, _OVERRIDES=overrides)
+
+    def test_missing_file_is_silent_default(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = load_overrides(Path(tempfile.gettempdir()) / "ctt-no-such-dir" / "pricing.json")
+        self.assertEqual(result, (1.0, {}))
+        self.assertEqual(err.getvalue(), "")
+
+    def test_cache_writes_derived_from_input(self):
+        (multiplier, overrides), err = self._load(
+            '{"overrides":{"claude-new-9":{"input":3,"output":15,"cacheRead":0.3}}}')
+        self.assertEqual(multiplier, 1.0)
+        self.assertEqual(err, "")
+        rates = overrides["claude-new-9"]
+        self.assertAlmostEqual(rates["cache_write_5m"], 3.75)
+        self.assertAlmostEqual(rates["cache_write_1h"], 6)
+        self.assertEqual(rates["cache_read"], 0.3)
+        self.assertEqual(rates["output"], 15)
+
+    def test_explicit_cache_writes_win(self):
+        (_, overrides), _ = self._load(
+            '{"overrides":{"claude-new-9":{"input":3,"output":15,"cacheRead":0.3,'
+            '"cacheWrite5m":4,"cacheWrite1h":7}}}')
+        self.assertEqual(overrides["claude-new-9"]["cache_write_5m"], 4)
+        self.assertEqual(overrides["claude-new-9"]["cache_write_1h"], 7)
+
+    def test_override_prices_a_new_model(self):
+        (multiplier, overrides), _ = self._load(
+            '{"overrides":{"claude-new-9":{"input":3,"output":15,"cacheRead":0.3}}}')
+        with self._active(multiplier, overrides):
+            self.assertEqual(rates_for("claude-new-9", NOW)["input"], 3)
+            self.assertEqual(rates_for("claude-new-9-20261101", NOW)["input"], 3)
+
+    def test_override_replaces_builtin_row(self):
+        (multiplier, overrides), _ = self._load(
+            '{"overrides":{"claude-opus-5-5":{"input":1,"output":2,"cacheRead":0.1}}}')
+        with self._active(multiplier, overrides):
+            self.assertEqual(rates_for("claude-opus-5-5", NOW)["output"], 2)
+            self.assertEqual(rates_for("claude-opus-5-5", "2026-01-01")["output"], 2)
+
+    def test_multiplier_scales_every_token_part(self):
+        (multiplier, overrides), _ = self._load('{"multiplier":0.85}')
+        self.assertEqual(multiplier, 0.85)
+        with self._active(multiplier, overrides):
+            cost = cost_usd({"input_tokens": 1_000_000}, "claude-opus-5-5", NOW)
+        self.assertAlmostEqual(cost["input"], 3.4)
+        self.assertAlmostEqual(cost["total"], 3.4)
+
+    def test_malformed_json_warns_once(self):
+        result, err = self._load('{"overrides": {')
+        self.assertEqual(result, (1.0, {}))
+        self.assertEqual(len(err.strip().splitlines()), 1)
+
+    def test_unreadable_file_warns_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                result = load_overrides(Path(tmp))  # a directory cannot be read as a file
+        self.assertEqual(result, (1.0, {}))
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+
+    def test_builtin_table_still_prices_after_a_bad_file(self):
+        (multiplier, overrides), _ = self._load("not json")
+        with self._active(multiplier, overrides):
+            self.assertEqual(rates_for("claude-opus-5-5", NOW)["input"], 4)
+
+    def test_row_missing_output_is_skipped(self):
+        (_, overrides), err = self._load(
+            '{"overrides":{"claude-bad":{"input":3,"cacheRead":0.3},'
+            '"claude-good":{"input":3,"output":15,"cacheRead":0.3}}}')
+        self.assertNotIn("claude-bad", overrides)
+        self.assertIn("claude-good", overrides)
+        self.assertIn("claude-bad", err)
+
+    def test_out_of_range_values_are_skipped(self):
+        (multiplier, overrides), err = self._load(
+            '{"multiplier":0,"overrides":{"claude-neg":{"input":-1,"output":15,"cacheRead":0.3},'
+            '"claude-big":{"input":3,"output":10001,"cacheRead":0.3},'
+            '"claude-str":{"input":"3","output":15,"cacheRead":0.3},'
+            '"claude-bool":{"input":true,"output":15,"cacheRead":0.3}}}')
+        self.assertEqual(multiplier, 1.0)
+        self.assertEqual(overrides, {})
+        self.assertEqual(len(err.strip().splitlines()), 5)
+
+    def test_multiplier_upper_bound_is_inclusive(self):
+        (multiplier, _), _ = self._load('{"multiplier":10}')
+        self.assertEqual(multiplier, 10)
 
 
 class TestParseTranscript(unittest.TestCase):

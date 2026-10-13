@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import sys
+from pathlib import Path
 
 # Source: platform.claude.com/docs/en/about-claude/pricing + /release-notes/overview, read 2026-10-13.
 # Cache writes are 1.25x (5m) and 2x (1h) input on every model. Cache reads are 0.1x input except where the
@@ -75,6 +79,79 @@ TOKEN_RATES = (
 )
 COST_PARTS = tuple(part for part, _ in TOKEN_RATES) + ("web_search",)
 
+# Optional user file, same shape and bounds as Claude Code's `modelPricing` setting:
+# {"multiplier": 0.85, "overrides": {"<model id>": {"input", "output", "cacheRead"[, "cacheWrite5m", "cacheWrite1h"]}}}
+OVERRIDES_PATH = Path(os.environ.get("CTT_PRICING") or Path.home() / ".config" / "claude-token-tracker" / "pricing.json")
+OVERRIDE_FIELDS = (
+    ("input", "input"),
+    ("output", "output"),
+    ("cache_read", "cacheRead"),
+    ("cache_write_5m", "cacheWrite5m"),
+    ("cache_write_1h", "cacheWrite1h"),
+)
+REQUIRED_OVERRIDE_FIELDS = ("input", "output", "cacheRead")
+MAX_RATE = 10_000
+MAX_MULTIPLIER = 10
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _warn(path: Path, message: str) -> None:
+    print(f"claude-token-tracker: {path}: {message}", file=sys.stderr)
+
+
+def _parse_override_row(path: Path, model: str, row) -> dict | None:
+    """Turn one user row into a rate dict, or warn and return None."""
+    if not isinstance(row, dict):
+        _warn(path, f"override for {model!r} is not an object; skipped")
+        return None
+    missing = [key for key in REQUIRED_OVERRIDE_FIELDS if key not in row]
+    if missing:
+        _warn(path, f"override for {model!r} lacks {', '.join(missing)}; skipped")
+        return None
+    for key in (key for _, key in OVERRIDE_FIELDS if key in row):
+        if not _is_number(row[key]) or not 0 <= row[key] <= MAX_RATE:
+            _warn(path, f"override for {model!r}: {key} must be a number from 0 to {MAX_RATE}; skipped")
+            return None
+    # Cache writes follow the published 1.25x / 2x input rule unless the user gives them.
+    derived = {"cacheWrite5m": row["input"] * 1.25, "cacheWrite1h": row["input"] * 2}
+    return {part: row.get(key, derived.get(key)) for part, key in OVERRIDE_FIELDS}
+
+
+def load_overrides(path: Path) -> tuple[float, dict[str, dict]]:
+    """Read the user price file: (multiplier, model -> rates). A missing file gives (1.0, {})."""
+    if not path.exists():
+        return 1.0, {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        _warn(path, f"ignored ({exc})")
+        return 1.0, {}
+    if not isinstance(data, dict):
+        _warn(path, "ignored (top level is not an object)")
+        return 1.0, {}
+
+    multiplier = 1.0
+    if "multiplier" in data:
+        value = data["multiplier"]
+        if _is_number(value) and 0 < value <= MAX_MULTIPLIER:
+            multiplier = float(value)
+        else:
+            _warn(path, f"multiplier must be a number above 0 and at most {MAX_MULTIPLIER}; using 1")
+
+    rows = data.get("overrides", {})
+    if not isinstance(rows, dict):
+        _warn(path, "overrides is not an object; ignored")
+        rows = {}
+    overrides = {}
+    for model, row in rows.items():
+        rates = _parse_override_row(path, model, row)
+        if rates is not None:
+            overrides[normalize_model(model)] = rates
+    return multiplier, overrides
+
 
 def normalize_model(model: str) -> str:
     """Strip context-window and date suffixes: 'claude-haiku-4-5-20251001' -> 'claude-haiku-4-5'."""
@@ -84,7 +161,10 @@ def normalize_model(model: str) -> str:
 
 def rates_for(model: str, date: str, prompt_tokens: int = 0) -> dict | None:
     """Return the rate table for a model on a YYYY-MM-DD date, or None when the model is unpriced."""
-    windows = PRICING.get(normalize_model(model))
+    model = normalize_model(model)
+    if model in _OVERRIDES:
+        return _OVERRIDES[model]
+    windows = PRICING.get(model)
     if not windows:
         return None
     for effective_from, effective_to, rates in windows:
@@ -119,7 +199,11 @@ def cost_usd(record: dict, model: str, date: str) -> dict | None:
     if rates is None or multiplier is None:
         return None
 
+    multiplier *= _MULTIPLIER
     cost = {part: record.get(field, 0) * rates[part] * multiplier / 1e6 for part, field in TOKEN_RATES}
     cost["web_search"] = record.get("web_search_requests", 0) * WEB_SEARCH_PER_REQUEST
     cost["total"] = sum(cost.values())
     return cost
+
+
+_MULTIPLIER, _OVERRIDES = load_overrides(OVERRIDES_PATH)
