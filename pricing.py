@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
@@ -120,11 +121,19 @@ def _parse_override_row(path: Path, model: str, row) -> dict | None:
     return {part: row.get(key, derived.get(key)) for part, key in OVERRIDE_FIELDS}
 
 
+def _decode_text(raw: bytes) -> str:
+    """The file as Windows tools save it too: UTF-8 with or without a BOM (Notepad), or UTF-16 with a BOM (Windows
+    PowerShell 5.1's > and Out-File)."""
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16")
+    return raw.decode("utf-8-sig")
+
+
 def load_overrides(path: Path) -> tuple[float, dict[str, dict]]:
     """Read the user price file: (multiplier, model -> rates). A missing file gives (1.0, {})."""
     # No exists() check: before Python 3.13 it raises when a parent folder cannot be searched.
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(_decode_text(path.read_bytes()))
     except FileNotFoundError:
         return 1.0, {}
     except (OSError, UnicodeDecodeError, ValueError) as exc:

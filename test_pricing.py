@@ -333,6 +333,30 @@ class TestOverrides(unittest.TestCase):
         self.assertAlmostEqual(cost["input"], 3.4)
         self.assertAlmostEqual(cost["total"], 3.4)
 
+    def test_files_saved_by_windows_tools_are_read(self):
+        """Notepad's "UTF-8 with BOM" and Windows PowerShell 5.1's > (UTF-16) were ignored with a warning (WIN-6)."""
+        text = '{"multiplier": 0.5}'
+        for name, raw in (("utf-8 BOM", b"\xef\xbb\xbf" + text.encode()), ("utf-16-le BOM", text.encode("utf-16")),
+                          ("utf-16-be BOM", b"\xfe\xff" + text.encode("utf-16-be"))):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "pricing.json"
+                path.write_bytes(raw)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    result = load_overrides(path)
+                self.assertEqual(result, (0.5, {}))
+                self.assertEqual(err.getvalue(), "")
+
+    def test_bytes_that_are_not_text_warn_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pricing.json"
+            path.write_bytes(b'{"multiplier": 0.5\xff}')
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                result = load_overrides(path)
+        self.assertEqual(result, (1.0, {}))
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+
     def test_malformed_json_warns_once(self):
         result, err = self._load('{"overrides": {')
         self.assertEqual(result, (1.0, {}))
