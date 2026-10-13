@@ -7,8 +7,10 @@ Scans ~/.claude/projects/ transcripts and aggregates token usage into a JSON rep
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -67,13 +69,25 @@ def new_stats() -> dict:
     return stats
 
 
-def entry_date(timestamp: str) -> str | None:
-    """Extract YYYY-MM-DD from an ISO timestamp, or None when it cannot be parsed."""
+def _parse_timestamp(timestamp: str) -> datetime | None:
     try:
         dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
-    return dt.strftime("%Y-%m-%d")
+    # A timestamp without an offset is taken as UTC, which is what Claude Code writes.
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def entry_date(timestamp: str) -> str | None:
+    """The user's local YYYY-MM-DD for an ISO timestamp, or None when it cannot be parsed."""
+    dt = _parse_timestamp(timestamp)
+    return dt.astimezone().strftime("%Y-%m-%d") if dt else None
+
+
+def utc_date(timestamp: str) -> str | None:
+    """The UTC YYYY-MM-DD for an ISO timestamp, or None. Price windows are UTC dates."""
+    dt = _parse_timestamp(timestamp)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d") if dt else None
 
 
 def total_tokens(stats: dict) -> int:
@@ -205,7 +219,7 @@ def parse_transcript(filepath: Path) -> list[dict]:
                 }
 
                 # Price windows follow the UTC date of the call.
-                date = entry_date(timestamp)
+                date = utc_date(timestamp)
                 if date and not unmodelled_cache:
                     record["cost"] = cost_usd(record, price_model, date)
                 else:
@@ -216,18 +230,42 @@ def parse_transcript(filepath: Path) -> list[dict]:
     return entries
 
 
-def extract_project_name(dir_name: str) -> str:
-    """Convert directory name like '-Users-binhnt-Coding-myproject' to 'myproject'."""
-    parts = dir_name.replace("-", "/").strip("/").split("/")
-    # Skip common path prefixes
-    skip = {"Users", "home", "binhnt", "Coding"}
-    meaningful = [p for p in parts if p and p not in skip]
-    return "/".join(meaningful) if meaningful else dir_name
+def encode_project_dir(cwd: str) -> str:
+    """The folder name Claude Code gives a working directory: every character outside [A-Za-z0-9-] becomes '-'."""
+    return re.sub(r"[^A-Za-z0-9-]", "-", cwd)
 
 
-def aggregate(entries: list[dict], date_filter: str | None = None) -> dict:
-    """Aggregate token usage by date and model."""
+def project_display_name(dir_name: str, cwds: Iterable[str], home: Path | None = None) -> str:
+    """Name a project folder by the working directory it was created for.
+
+    The folder name cannot be decoded ('-' stands for '/', '.', '_' and '-' alike), so the cwd recorded in the
+    transcripts is used: the one that encodes to the folder name, else the shortest, else the folder name.
+    """
+    cwds = sorted(set(cwds), key=lambda c: (len(c), c))
+    matching = [c for c in cwds if encode_project_dir(c) == dir_name]
+    name = matching[0] if matching else cwds[0] if cwds else None
+    if name is None:
+        return dir_name
+    home_str = str(Path.home() if home is None else home).rstrip("/\\")
+    if name == home_str:
+        return "~"
+    if home_str and name.startswith(home_str) and name[len(home_str)] in "/\\":
+        return "~" + name[len(home_str):]
+    return name
+
+
+def add_stats(into: dict, stats: dict) -> None:
+    """Add one stats bucket into another."""
+    for k in TOKEN_KEYS + ("requests", "unpriced_requests", "unpriced_tokens"):
+        into[k] += stats[k]
+    for k, v in stats["cost"].items():
+        into["cost"][k] += v
+
+
+def aggregate(entries: list[dict], date_filter: str | None = None) -> tuple[dict, dict]:
+    """Aggregate usage by local date and model, and by local date and project, in one pass."""
     by_date = defaultdict(lambda: defaultdict(new_stats))
+    by_date_project = defaultdict(lambda: defaultdict(new_stats))
 
     for e in entries:
         date_str = entry_date(e["timestamp"])
@@ -237,8 +275,9 @@ def aggregate(entries: list[dict], date_filter: str | None = None) -> dict:
             continue
 
         accumulate(by_date[date_str][e["model"]], e)
+        accumulate(by_date_project[date_str][e.get("project", "unknown")], e)
 
-    return dict(by_date)
+    return dict(by_date), dict(by_date_project)
 
 
 def collect_all_entries() -> tuple[list[dict], dict]:
@@ -251,12 +290,16 @@ def collect_all_entries() -> tuple[list[dict], dict]:
         print(f"Claude directory not found: {CLAUDE_DIR}")
         sys.exit(1)
 
+    by_dir = defaultdict(list)
     for root in roots:
         for dir_name, jsonl_file in iter_transcripts(root):
-            project_name = extract_project_name(dir_name)
-            for record in parse_transcript(jsonl_file):
-                record["project"] = project_name
-                all_entries.append(record)
+            by_dir[dir_name].extend(parse_transcript(jsonl_file))
+
+    for dir_name, records in by_dir.items():
+        project_name = project_display_name(dir_name, {r["cwd"] for r in records if r.get("cwd")})
+        for record in records:
+            record["project"] = project_name
+        all_entries.extend(records)
 
     # De-duplicate across every file before any total: copies of a call can sit in different files.
     all_entries = dedupe(all_entries)
@@ -277,8 +320,11 @@ def finalize_stats(stats: dict) -> dict:
 
 
 def build_report(all_entries: list[dict], project_totals: dict, date_filter: str | None = None) -> dict:
-    """Build the final report."""
-    by_date = aggregate(all_entries, date_filter)
+    """Build the final report.
+
+    project_totals is kept for callers; by_project is re-derived from the entries so it follows date_filter.
+    """
+    by_date, by_date_project = aggregate(all_entries, date_filter)
 
     grand = new_stats()
     unpriced_models = set()
@@ -303,10 +349,20 @@ def build_report(all_entries: list[dict], project_totals: dict, date_filter: str
     for date in sorted(by_date.keys(), reverse=True):
         sorted_dates[date] = {model: finalize_stats(s) for model, s in by_date[date].items()}
 
+    projects = defaultdict(new_stats)
+    for day_projects in by_date_project.values():
+        for name, stats in day_projects.items():
+            add_stats(projects[name], stats)
+
+    def by_tokens(items):
+        return sorted(items, key=lambda x: total_tokens(x[1]), reverse=True)
+
     # Sort projects by billable tokens descending, add display values
-    sorted_projects = {}
-    for name, stats in sorted(project_totals.items(), key=lambda x: total_tokens(x[1]), reverse=True):
-        sorted_projects[name] = finalize_stats(stats)
+    sorted_projects = {name: finalize_stats(stats) for name, stats in by_tokens(projects.items())}
+    sorted_date_projects = {
+        date: {name: finalize_stats(stats) for name, stats in by_tokens(by_date_project[date].items())}
+        for date in sorted(by_date_project, reverse=True)
+    }
 
     # The grand cost only ever aggregates priced buckets, so it stays a real number.
     summary = add_display(grand)
@@ -317,6 +373,7 @@ def build_report(all_entries: list[dict], project_totals: dict, date_filter: str
         "summary": summary,
         "by_date": sorted_dates,
         "by_project": sorted_projects,
+        "by_date_project": sorted_date_projects,
     }
 
 
@@ -372,12 +429,9 @@ def print_summary(report: dict):
             model_list = ", ".join(models.keys())
             print(f"    {date}: {day_total:>10,} tokens ({day_reqs:,} reqs) [{model_list}]")
 
-    # Top projects. These are always all-time: entries carry no project name, so the
-    # per-project totals cannot be re-derived under a date filter.
     projects = report["by_project"]
     if projects:
-        scope = " (all time — NOT filtered)" if report["date_filter"] else ""
-        print(f"\n  TOP PROJECTS{scope}:")
+        print("\n  TOP PROJECTS:")
         for i, (name, stats) in enumerate(projects.items()):
             if i >= 10:
                 break
@@ -393,10 +447,11 @@ def main():
     date_filter = None
     if len(sys.argv) > 1:
         arg = sys.argv[1]
+        # Days are the user's local days, the same buckets the report uses.
         if arg == "today":
-            date_filter = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            date_filter = datetime.now().astimezone().strftime("%Y-%m-%d")
         elif arg == "yesterday":
-            date_filter = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+            date_filter = (datetime.now().astimezone() - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
             date_filter = arg  # Expect YYYY-MM-DD
 

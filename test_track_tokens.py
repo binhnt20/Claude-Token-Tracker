@@ -14,18 +14,28 @@ from unittest import mock
 import pricing
 import track_tokens
 from sources import iter_transcripts, transcript_roots
-from track_tokens import collect_all_entries, dedupe, parse_transcript
+from track_tokens import (
+    build_report,
+    collect_all_entries,
+    dedupe,
+    encode_project_dir,
+    entry_date,
+    parse_transcript,
+    project_display_name,
+    utc_date,
+)
 
 
 def assistant_line(*, msg_id="msg_1", request_id="req_1", session="s1", uuid=None, output=10, input_tokens=5,
-                   cache_read=1_000, model="claude-opus-5-5", timestamp="2026-10-13T10:00:00Z", **usage_extra):
+                   cache_read=1_000, model="claude-opus-5-5", timestamp="2026-10-13T10:00:00Z", cwd="/work/repo",
+                   **usage_extra):
     """One assistant JSONL line as Claude Code writes it; None drops an id field."""
     message = {"model": model, "usage": {
         "input_tokens": input_tokens, "output_tokens": output, "cache_read_input_tokens": cache_read,
         "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, **usage_extra}}
     if msg_id is not None:
         message["id"] = msg_id
-    entry = {"type": "assistant", "timestamp": timestamp, "sessionId": session, "cwd": "/work/repo",
+    entry = {"type": "assistant", "timestamp": timestamp, "sessionId": session, "cwd": cwd,
              "isSidechain": False, "message": message}
     if request_id is not None:
         entry["requestId"] = request_id
@@ -151,6 +161,86 @@ class TestCollectAllEntries(TranscriptCase):
         self.assertEqual(stats["requests"], 1)
         self.assertEqual(stats["output_tokens"], 471)
         self.assertIn("web_search", stats["cost"])
+
+
+@unittest.skipUnless(hasattr(time, "tzset"), "time.tzset is POSIX only")
+class TestLocalDates(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"TZ": "Asia/Ho_Chi_Minh"})
+        patcher.start()
+        time.tzset()
+        self.addCleanup(time.tzset)
+        self.addCleanup(patcher.stop)
+
+    def test_entry_date_is_the_local_day(self):
+        self.assertEqual(entry_date("2026-10-12T18:30:00Z"), "2026-10-13")
+
+    def test_utc_date_stays_utc(self):
+        self.assertEqual(utc_date("2026-10-12T18:30:00Z"), "2026-10-12")
+
+    def test_bad_timestamps(self):
+        self.assertIsNone(entry_date("not a time"))
+        self.assertIsNone(utc_date(None))
+
+
+class TestProjectNames(unittest.TestCase):
+    def test_encoding_matches_claude_code(self):
+        self.assertEqual(encode_project_dir("/home/u/code/projects-sync/fraud-6"), "-home-u-code-projects-sync-fraud-6")
+        self.assertEqual(encode_project_dir("D:\\Work\\repo"), "D--Work-repo")
+
+    def test_matching_cwd_wins_and_home_is_tilde(self):
+        cwds = {"/home/u/code/projects-sync/fraud-6", "/home/u/code/projects-sync/fraud-6/backend"}
+        self.assertEqual(project_display_name("-home-u-code-projects-sync-fraud-6", cwds, home=Path("/home/u")),
+                         "~/code/projects-sync/fraud-6")
+
+    def test_windows_folder_resolves_to_its_cwd(self):
+        self.assertEqual(project_display_name("D--Work-repo", {"D:\\Work\\repo"}, home=Path("/home/u")),
+                         "D:\\Work\\repo")
+
+    def test_no_matching_cwd_uses_the_shortest(self):
+        cwds = {"/srv/app/sub", "/srv/app"}
+        self.assertEqual(project_display_name("-srv-renamed", cwds, home=Path("/home/u")), "/srv/app")
+
+    def test_no_cwd_keeps_the_folder_name(self):
+        self.assertEqual(project_display_name("-srv-app", set(), home=Path("/home/u")), "-srv-app")
+
+    def test_home_itself_is_tilde(self):
+        self.assertEqual(project_display_name("-home-u", {"/home/u"}, home=Path("/home/u")), "~")
+
+
+class TestReport(TranscriptCase):
+    DAY1, DAY2 = "2026-10-10", "2026-10-12"
+
+    def collect(self):
+        # Noon UTC lands on the same calendar day in every time zone from UTC-11 to UTC+11.
+        self.write([assistant_line(request_id="r1", output=100, cwd="/srv/alpha",
+                                   timestamp=f"{self.DAY1}T12:00:00Z")], folder="-srv-alpha")
+        self.write([assistant_line(request_id="r2", output=7, cwd="/srv/beta",
+                                   timestamp=f"{self.DAY2}T12:00:00Z")], folder="-srv-beta")
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[Path(self.tmp.name)]):
+            return collect_all_entries()
+
+    def test_records_carry_the_cwd_project_name(self):
+        entries, _ = self.collect()
+        self.assertEqual(sorted(e["project"] for e in entries), ["/srv/alpha", "/srv/beta"])
+
+    def test_by_date_project_has_both_days(self):
+        report = build_report(*self.collect())
+        self.assertEqual(set(report["by_date_project"]), {self.DAY1, self.DAY2})
+        self.assertEqual(report["by_date_project"][self.DAY1]["/srv/alpha"]["output_tokens"], 100)
+        self.assertEqual(report["by_date_project"][self.DAY2]["/srv/beta"]["output_tokens"], 7)
+
+    def test_projects_follow_the_date_filter(self):
+        report = build_report(*self.collect(), date_filter=self.DAY1)
+        self.assertEqual(list(report["by_project"]), ["/srv/alpha"])
+        self.assertEqual(report["by_project"]["/srv/alpha"]["output_tokens"], 100)
+        self.assertEqual(list(report["by_date_project"]), [self.DAY1])
+
+    def test_unfiltered_projects_sum_every_day(self):
+        report = build_report(*self.collect())
+        self.assertEqual(report["by_project"]["/srv/alpha"]["requests"], 1)
+        self.assertEqual(report["by_project"]["/srv/beta"]["requests"], 1)
+        self.assertIsNotNone(report["by_project"]["/srv/alpha"]["cost"])
 
 
 class TestSources(unittest.TestCase):
