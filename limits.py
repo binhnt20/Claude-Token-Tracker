@@ -11,7 +11,8 @@ of this computer fall inside the gap:
   the short gaps; with no fit yet, the whole rise;
 - a gap with no Claude Code call (chat in a break, another device): nothing.
 
-The window start (`resets_at` minus its length) counts as 0 %. The result never exceeds the account %.
+The window start (`resets_at` minus its length, give or take the hour `resets_at` is rounded to) counts as 0 %. The
+result never exceeds the account %.
 """
 
 from __future__ import annotations
@@ -33,6 +34,9 @@ LABELS = {"five_hour": "5-hour", "seven_day": "weekly"}
 SHORT_GAP_S = 600
 CALL_SLACK_S = 5  # a sample is written just after the response whose call it reports
 SAME_WINDOW_S = 600  # reset times this close name one window
+# Claude Code reports resets_at rounded to the hour, so a window may open up to an hour before resets_at minus its
+# length: the first gap also takes the calls of that hour.
+ROUNDING_S = 3600
 
 
 def _epoch(text) -> float | None:
@@ -138,7 +142,7 @@ def _gaps(window: dict, length: int, calls: _Calls, excluded: set) -> list[tuple
             running = pct
     gaps = []
     for i, ((t0, p0), (t1, p1)) in enumerate(zip(kept, kept[1:])):
-        low = t0 - CALL_SLACK_S if i == 0 else t0 + CALL_SLACK_S
+        low = t0 - ROUNDING_S if i == 0 else t0 + CALL_SLACK_S
         n, usd = calls.between(low, t1 + CALL_SLACK_S, excluded)
         gaps.append((p1 - p0, t1 - t0, n, usd))
     return gaps

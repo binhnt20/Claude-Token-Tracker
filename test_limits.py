@@ -79,6 +79,12 @@ class TestShare(unittest.TestCase):
         (window,) = five(share(rows, [call(30), call(3590)]))
         self.assertEqual((window["measured_pct"], window["estimated_pct"]), (0.0, 10.0))
 
+    def test_a_window_may_open_an_hour_before_its_rounded_reset(self):
+        """Claude Code reports resets_at rounded to the hour (13-10: 13:00:00Z, 00:00:00Z)."""
+        rows = [sample(60, five=2)]
+        self.assertEqual(five(share(rows, [call(-1800)]))[0]["claude_code_pct"], 2.0)
+        self.assertEqual(five(share(rows, [call(-3700)]))[0]["claude_code_pct"], 0.0)
+
     def test_a_stale_sample_is_dropped(self):
         """A status line re-run without a new response repeats an older, lower value."""
         rows = [sample(60, five=5), sample(70, five=3, session="s2"), sample(130, five=6)]
