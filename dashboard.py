@@ -1,6 +1,7 @@
 """Generate a self-contained HTML dashboard from a token usage report."""
 from __future__ import annotations
 
+import html as html_lib
 import json
 from pathlib import Path
 
@@ -20,13 +21,160 @@ def _load_asset(name: str) -> str:
     return ""
 
 
+# Dates are local calendar days end to end: the report buckets by local day, so these helpers never go through UTC.
+DATE_HELPERS_JS = """\
+function toDate(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
+function isoDate(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-'
+    + String(d.getDate()).padStart(2, '0');
+}
+function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
+function localToday() { return isoDate(new Date()); }
+function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+// Calendar days from..to inclusive; rounding absorbs the 23- and 25-hour days of a DST change.
+function rangeDays(from, to) { return Math.round((toDate(to) - toDate(from)) / 86400000) + 1; }
+// [from, to] for a quick button; 0 = all time, [null, null], every day with data. The others end today, so a day
+// stamped in the future by a wrong clock stays out of "Last 7 days". today is an argument so a page left open past
+// midnight follows the clock.
+function rangeFor(days, allDates, today) {
+  if (days === 0) return [null, null];
+  if (days === 2) { const y = isoDate(addDays(toDate(today), -1)); return [y, y]; }
+  return [isoDate(addDays(toDate(today), -(days - 1))), today];
+}
+// The dates of allDates inside [from, to]; null leaves that end open.
+function datesInRange(allDates, from, to) {
+  return allDates.filter(d => (!from || d >= from) && (!to || d <= to));
+}
+// Every calendar day from..to inclusive, so the chart keeps the days without usage.
+function calendarDays(from, to) {
+  const days = [];
+  for (let d = toDate(from); isoDate(d) <= to; d = addDays(d, 1)) days.push(isoDate(d));
+  return days;
+}
+// The chart's x axis: the range, with an open end resolved to the first or last day with data.
+function chartDays(from, to, allDates) {
+  const first = from || allDates[0], last = to || allDates[allDates.length - 1];
+  return first && last ? calendarDays(first, last) : [];
+}
+// " (N days)" counts the calendar days in the range, not the days with usage; an open start is the first day with
+// data and an open end is today.
+function rangeLabel(from, to, allDates, today) {
+  if (!from && !to) return ' (all time)';
+  const end = to || today;
+  return ' (' + plural(rangeDays(from || allDates[0] || end, end), 'day') + ')';
+}
+"""
+
+FORMAT_HELPERS_JS = """\
+function fmt(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return String(n);
+}
+function fmtFull(n) { return n.toLocaleString(); }
+// Four decimals only for a cost too small to show in cents; zero is $0.00.
+function fmtUSD(n) {
+  if (n >= 1000) return '$' + (n/1000).toFixed(1) + 'K';
+  if (n >= 0.01 || n === 0) return '$' + n.toFixed(2);
+  return '$' + n.toFixed(4);
+}
+function fmtVND(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B VND';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M VND';
+  if (n >= 1e3) return (n/1e3).toFixed(0) + 'K VND';
+  return Math.round(n) + ' VND';
+}
+// The cost figure silently omits these requests otherwise.
+function unpricedNote(stats) {
+  if (!stats.unpricedRequests) return '';
+  const n = stats.unpricedRequests, m = stats.unpricedModels.size;
+  return 'Cost excludes ' + fmtFull(n) + ' request' + (n === 1 ? '' : 's') + ' from ' + plural(m, 'model')
+    + ' with no price table (' + fmt(stats.unpricedTokens) + ' tokens, counted above).';
+}
+"""
+
+# Model colours stay at least 20 apart in CIE Lab, so two models side by side in a stacked bar never look alike.
+MODEL_COLORS = {
+    "claude-opus-5-5": "#6366f1",
+    "claude-opus-5": "#a78bfa",
+    "claude-opus-4-8": "#3b82f6",
+    "claude-fable-5-1": "#e879f9",
+    "claude-fable-5": "#9333ea",
+    "claude-sonnet-5-5": "#14b8a6",
+    "claude-sonnet-5": "#a3e635",
+    "claude-sonnet-4-6": "#16a34a",
+    "claude-haiku-5-5": "#facc15",
+    "claude-haiku-4-5": "#ea580c",
+}
+FALLBACK_COLORS = ["#f472b6", "#22d3ee", "#60a5fa", "#f87171"]
+
+# Sums the report's per-day project buckets over the selected dates, so the table follows the date filter.
+PROJECT_HELPERS_JS = """\
+function sumProjects(byDateProject, dates) {
+  const acc = {};
+  dates.forEach(d => {
+    Object.entries(byDateProject[d] || {}).forEach(([name, v]) => {
+      const p = acc[name] || (acc[name] = { name, total: 0, input: 0, output: 0, cache_5m: 0, cache_1h: 0,
+                                             cache_read: 0, requests: 0, cost: null, unpricedRequests: 0 });
+      p.total += v.input_tokens + v.output_tokens + v.cache_creation_input_tokens;
+      p.input += v.input_tokens;
+      p.output += v.output_tokens;
+      p.cache_5m += v.cache_creation_5m_tokens;
+      p.cache_1h += v.cache_creation_1h_tokens;
+      p.cache_read += v.cache_read_input_tokens;
+      p.requests += v.requests;
+      p.unpricedRequests += v.unpriced_requests;
+      // A day whose requests were all unpriced has cost null; it adds nothing, and the project stays null
+      // only when every day in range was unpriced.
+      if (v.cost) p.cost = (p.cost || 0) + v.cost.total;
+    });
+  });
+  return Object.values(acc);
+}
+// Share of a project's requests that the cost covers. Rounded down: 99.6% must not read as "100%". Multiplying
+// first keeps exact shares exact (58 / 100 * 100 is 57.99999999999999).
+function pricedPercent(p) { return Math.floor((p.requests - p.unpricedRequests) * 100 / p.requests); }
+// Project names are folder paths and may hold any character.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+"""
+
+
+def _page_bucket(stats: dict) -> dict:
+    return {k: v for k, v in stats.items() if not k.endswith("_display")}
+
+
+def page_data_json(report: dict) -> str:
+    """The part of the report the page reads, as a script-safe JS literal.
+
+    The display strings and all-time tables only made the page bigger. Every '<' is escaped, so no project name can
+    end the <script> element early.
+    """
+    data = {"generated_at": report.get("generated_at")}
+    for key in ("by_date", "by_date_project"):
+        data[key] = {day: {name: _page_bucket(stats) for name, stats in buckets.items()}
+                     for day, buckets in report.get(key, {}).items()}
+    return json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
+
+
+def footer_html(report: dict) -> str:
+    """The footer: which transcripts folders were read and how many calls each held, so a machine with two sides
+    (Windows and WSL) shows that both were counted."""
+    sources = report.get("sources", [])
+    read_from = " · ".join(f"{html_lib.escape(s['folder'])} ({s['requests']:,} calls)" for s in sources)
+    prefix = f"Read from {read_from}<br>" if read_from else ""
+    return f"<footer>{prefix}Generated by Claude Code Token Tracker</footer>"
+
+
 def generate_html(report: dict) -> str:
     """Return a complete self-contained HTML dashboard string."""
     chartjs = _load_asset("chart.min.js")
     flatpickr_css = _load_asset("flatpickr.min.css")
     flatpickr_dark_css = _load_asset("flatpickr-dark.css")
     flatpickr_js = _load_asset("flatpickr.min.js")
-    data_json = json.dumps(report, ensure_ascii=False)
+    data_json = page_data_json(report)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -173,7 +321,7 @@ span.flatpickr-weekday {{ color: var(--text2) !important; }}
   </div>
 
   <div class="table-box">
-    <h2>Projects</h2>
+    <h2 id="projectTitle">Projects</h2>
     <table id="projectTable">
       <thead><tr>
         <th data-key="name">Project</th>
@@ -190,7 +338,7 @@ span.flatpickr-weekday {{ color: var(--text2) !important; }}
     </table>
   </div>
 
-  <footer>Generated by Claude Code Token Tracker</footer>
+  {footer_html(report)}
 </div>
 
 <script>{flatpickr_js}</script>
@@ -199,62 +347,28 @@ span.flatpickr-weekday {{ color: var(--text2) !important; }}
 const RAW = {data_json};
 
 // ===================== Helpers =====================
-function fmt(n) {{
-  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
-  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
-  return String(n);
-}}
-function fmtFull(n) {{ return n.toLocaleString(); }}
-
-function toDate(s) {{ return new Date(s + 'T00:00:00'); }}
-function isoDate(d) {{ return d.toISOString().slice(0, 10); }}
-function addDays(d, n) {{ const r = new Date(d); r.setDate(r.getDate() + n); return r; }}
-
+{DATE_HELPERS_JS}
+{FORMAT_HELPERS_JS}
+{PROJECT_HELPERS_JS}
 const allDates = Object.keys(RAW.by_date).sort();
-const todayStr = allDates.length ? allDates[allDates.length - 1] : isoDate(new Date());
 
 // CSS vars for chart colors
 const cs = getComputedStyle(document.body);
 const txtColor = () => cs.getPropertyValue('--text2').trim();
 const borderColor = () => cs.getPropertyValue('--border').trim();
 
-const modelColors = {{
-  'claude-opus-4-8': '#818cf8',
-  'claude-fable-5': '#a78bfa',
-  'claude-sonnet-5': '#2dd4bf',
-  'claude-sonnet-4-6': '#34d399',
-  'claude-haiku-4-5': '#fb923c',
-}};
-function getColor(m, i) {{ return modelColors[m] || ['#f472b6','#22d3ee','#60a5fa','#f87171'][i % 4]; }}
+const modelColors = {json.dumps(MODEL_COLORS)};
+const fallbackColors = {json.dumps(FALLBACK_COLORS)};
+function getColor(m, i) {{ return modelColors[m] || fallbackColors[i % fallbackColors.length]; }}
 
 // Costs are computed in pricing.py and arrive on the report. This file never prices anything.
 const USD_TO_VND = 25_850;
-
-function fmtUSD(n) {{
-  if (n >= 1000) return '$' + (n/1000).toFixed(1) + 'K';
-  if (n >= 1) return '$' + n.toFixed(2);
-  if (n >= 0.01) return '$' + n.toFixed(2);
-  return '$' + n.toFixed(4);
-}}
-function fmtVND(n) {{
-  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B VND';
-  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M VND';
-  if (n >= 1e3) return (n/1e3).toFixed(0) + 'K VND';
-  return Math.round(n) + ' VND';
-}}
 
 // ===================== Date filter state =====================
 let filterFrom = null; // null = no lower bound
 let filterTo = null;   // null = no upper bound
 
-function filteredDates() {{
-  return allDates.filter(d => {{
-    if (filterFrom && d < filterFrom) return false;
-    if (filterTo && d > filterTo) return false;
-    return true;
-  }});
-}}
+function filteredDates() {{ return datesInRange(allDates, filterFrom, filterTo); }}
 
 // ===================== Compute filtered stats =====================
 function billableTokens(v) {{
@@ -328,14 +442,8 @@ function renderCards(summary, costUSD) {{
   }});
 }}
 
-// The cost figure silently omits these requests otherwise.
 function renderUnpricedNote(stats) {{
-  const note = document.getElementById('unpricedNote');
-  note.textContent = stats.unpricedRequests
-    ? `Cost excludes ${{fmtFull(stats.unpricedRequests)}} requests across `
-      + `${{stats.unpricedModels.size}} model(s) with no price table `
-      + `(${{fmt(stats.unpricedTokens)}} tokens, counted above).`
-    : '';
+  document.getElementById('unpricedNote').textContent = unpricedNote(stats);
 }}
 
 function renderDailyChart(dates) {{
@@ -343,13 +451,14 @@ function renderDailyChart(dates) {{
   dates.forEach(d => Object.entries(RAW.by_date[d] || {{}}).forEach(([m, v]) => {{
     totals[m] = (totals[m] || 0) + billableTokens(v);
   }}));
-  // Drop models with nothing to plot (e.g. '<synthetic>', which never reports tokens).
+  // Drop models with nothing to plot in this range.
   const models = Object.keys(totals).filter(m => totals[m] > 0);
 
   const maxBarPx = 80;
+  const days = chartDays(filterFrom, filterTo, allDates);
   const datasets = models.map((m, i) => ({{
     label: m.replace('claude-', ''),
-    data: dates.map(d => {{
+    data: days.map(d => {{
       const v = RAW.by_date[d]?.[m];
       return v ? billableTokens(v) : 0;
     }}),
@@ -357,12 +466,12 @@ function renderDailyChart(dates) {{
     maxBarThickness: maxBarPx,
   }}));
 
-  const labels = dates.map(d => d.slice(5)); // MM-DD
+  const labels = days.map(d => d.slice(5)); // MM-DD
 
   if (dailyChart) {{ dailyChart.destroy(); }}
 
   document.getElementById('chartTitle').textContent =
-    'Daily Token Usage' + (dates.length < allDates.length ? ` (${{dates.length}} days)` : ' (all time)');
+    'Daily Token Usage' + rangeLabel(filterFrom, filterTo, allDates, localToday());
 
   dailyChart = new Chart(document.getElementById('dailyChart'), {{
     type: 'bar',
@@ -403,25 +512,14 @@ function renderModelChart(byModel) {{
   }});
 }}
 
-// --- Project Table (uses RAW.by_project, all-time) ---
+// --- Project Table (RAW.by_date_project over the filtered dates) ---
 let projects = [];
 let sortKey = 'total', sortAsc = false;
 
 function buildProjectList(dates) {{
-  // Rebuild project totals from by_date -> we need per-project-per-date data
-  // RAW doesn't have that granularity, so show all-time project breakdown
-  projects = Object.entries(RAW.by_project).map(([name, v]) => ({{
-    name,
-    total: billableTokens(v),
-    input: v.input_tokens,
-    output: v.output_tokens,
-    cache_5m: v.cache_creation_5m_tokens,
-    cache_1h: v.cache_creation_1h_tokens,
-    cache_read: v.cache_read_input_tokens,
-    requests: v.requests,
-    cost: v.cost ? v.cost.total : null,
-    unpricedRequests: v.unpriced_requests,
-  }}));
+  projects = sumProjects(RAW.by_date_project || {{}}, dates);
+  document.getElementById('projectTitle').textContent =
+    'Projects' + rangeLabel(filterFrom, filterTo, allDates, localToday());
 }}
 
 // A project can mix priced and unpriced models, so its cost may cover only part of
@@ -429,10 +527,9 @@ function buildProjectList(dates) {{
 function costCell(p) {{
   if (p.cost === null) return '<span class="badge">unpriced</span>';
   if (!p.unpricedRequests) return fmtUSD(p.cost);
-  const covered = p.requests - p.unpricedRequests;
   return `${{fmtUSD(p.cost)}} <span class="badge" title="${{fmtFull(p.unpricedRequests)}} of `
     + `${{fmtFull(p.requests)}} requests have no price table and are excluded from this cost">`
-    + `${{Math.round(covered / p.requests * 100)}}%</span>`;
+    + `${{pricedPercent(p)}}%</span>`;
 }}
 
 function renderTable() {{
@@ -449,7 +546,7 @@ function renderTable() {{
   }});
   const tbody = document.getElementById('projectBody');
   tbody.innerHTML = sorted.map(p =>
-    `<tr><td>${{p.name}}</td>` +
+    `<tr><td>${{escapeHtml(p.name)}}</td>` +
     `<td class="num" title="${{fmtFull(p.total)}}">${{fmt(p.total)}}</td>` +
     `<td class="num" title="${{fmtFull(p.input)}}">${{fmt(p.input)}}</td>` +
     `<td class="num" title="${{fmtFull(p.output)}}">${{fmt(p.output)}}</td>` +
@@ -492,35 +589,13 @@ function renderAll() {{
   else if (filterFrom) filterText = 'from ' + filterFrom;
   else if (filterTo) filterText = 'to ' + filterTo;
   else filterText = 'All time';
-  document.getElementById('subtitle').textContent =
-    filterText + ' | ' + dates.length + ' days | Generated: ' + RAW.generated_at.slice(0, 19) + 'Z';
+  document.getElementById('subtitle').textContent = filterText + ' | ' + plural(dates.length, 'day')
+    + ' with usage | Generated: ' + RAW.generated_at.slice(0, 19) + 'Z';
 }}
 
 // ===================== Filter bar logic =====================
 function setRange(days) {{
-  if (days === 0) {{
-    // All time (max 180 days)
-    if (allDates.length > 180) {{
-      filterFrom = allDates[allDates.length - 180];
-    }} else {{
-      filterFrom = null;
-    }}
-    filterTo = null;
-  }} else if (days === 1) {{
-    // Today
-    filterFrom = todayStr;
-    filterTo = todayStr;
-  }} else if (days === 2) {{
-    // Yesterday
-    const y = isoDate(addDays(toDate(todayStr), -1));
-    filterFrom = y;
-    filterTo = y;
-  }} else {{
-    // Last N days
-    const capDays = Math.min(days, 180);
-    filterFrom = isoDate(addDays(toDate(todayStr), -(capDays - 1)));
-    filterTo = null;
-  }}
+  [filterFrom, filterTo] = rangeFor(days, allDates, localToday());
   renderAll();
 }}
 
@@ -551,7 +626,7 @@ const rangeHint = document.getElementById('rangeHint');
 const fpOpts = {{
   dateFormat: 'Y-m-d',
   minDate: allDates.length ? allDates[0] : undefined,
-  maxDate: todayStr,
+  maxDate: localToday(),
   disableMobile: true,
   theme: 'dark',
 }};
@@ -564,13 +639,22 @@ btnCustom.addEventListener('click', () => {{
   if (isVisible) {{
     dateRangeEl.classList.remove('visible');
   }} else {{
+    const today = localToday();
+    fpFrom.set('maxDate', today);
+    fpTo.set('maxDate', today);
     dateRangeEl.classList.add('visible');
-    fpFrom.setDate(filterFrom || (allDates.length ? allDates[0] : todayStr), false);
-    fpTo.setDate(filterTo || todayStr, false);
+    fpFrom.setDate(filterFrom || (allDates.length ? allDates[0] : today), false);
+    fpTo.setDate(filterTo || today, false);
+    clearRangeHint();
   }}
   document.querySelectorAll('.filter-bar button').forEach(b => b.classList.remove('active'));
   btnCustom.classList.add('active');
 }});
+
+function clearRangeHint() {{
+  rangeHint.textContent = '';
+  rangeHint.className = 'range-hint';
+}}
 
 function applyCustomRange() {{
   const from = dateFromEl.value;
@@ -583,8 +667,7 @@ function applyCustomRange() {{
     return;
   }}
 
-  rangeHint.textContent = '';
-  rangeHint.className = 'range-hint';
+  clearRangeHint();
 
   filterFrom = from;
   filterTo = to;
