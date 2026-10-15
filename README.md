@@ -51,6 +51,23 @@ A date that does not exist (`2026-13-45`) exits with code 2 before scanning. "RE
 
 No dependency manifest is checked in — the tracker itself needs only the Python standard library; install `pywebview` (plus `qtpy` and `PySide6` on Linux, and `pyinstaller` for builds) manually.
 
+## Claude Code's share of the 5-hour and weekly limits
+
+The plan's 5-hour and weekly limits are one pool for Claude Code, claude.ai chat, Cowork and every device, and transcripts hold tokens, not percentages. Claude Code hands the official percentages to its status line command after each response (Pro and Max accounts only). `statusline.py` records them, and the dashboard and the CLI show the part that Claude Code on this computer used:
+
+> Claude Code used 30.2% of the 5-hour limit (account total 38.0%) · resets 14:05 · as of 13:52
+
+Turn it on once per side, from a source checkout (Windows and WSL each have their own Claude Code settings):
+
+```bash
+python3 statusline.py --install     # on Windows: python statusline.py --install
+python3 statusline.py --uninstall   # put the previous status line back
+```
+
+`--install` edits `~/.claude/settings.json` (or the one in `CLAUDE_CONFIG_DIR`) after saving a backup next to it. A status line you already have (yours, or Orca's) keeps working: the new command passes Claude Code's input to both and shows your status line's output; with none, it shows `5h 38% · 7d 41%`. A second install changes nothing. Samples go to `limits.jsonl` in the tracker's data folder (`~/.local/share/claude-token-tracker/`, `%LOCALAPPDATA%\claude-token-tracker\`, `~/Library/Application Support/claude-token-tracker/`); both sides of a Windows + WSL computer are read. The bridge reads only what Claude Code passes it: no credentials, no network. The command points at this copy of `statusline.py`, so after moving the folder run `--install` again.
+
+**How the share is estimated.** Each rise of the official percentage between two samples counts as Claude Code when this computer's Claude Code calls fall inside the gap: all of it for a gap of up to 10 minutes; for a longer gap, at most what the calls' API-equivalent cost explains at the percent-per-dollar rate measured on the short gaps; nothing for a gap with no Claude Code call (chat in a break, another device). The window start counts as 0 %. What it cannot see: chat used during a Claude Code turn counts as Claude Code; sessions run without the bridge (another computer, a side without the install) are missed; samples start at the install, so the first window is partial. API-key users get no percentages.
+
 ## Build Standalone Executable
 
 ```bash
@@ -85,12 +102,16 @@ Push a tag `v*` (or run the workflow manually) to trigger GitHub Actions builds 
 app.py              # Desktop entry point (always all-time scan + native window)
 track_tokens.py     # Data collection/aggregation + its own date-filtered CLI
 sources.py          # Finds every transcript directory and file
+statusline.py       # Status line bridge: records the plan-limit percentages Claude Code shows
+limits.py           # Claude Code's share of the 5-hour and weekly limits, from those samples
 pricing.py          # Rate tables + cost math (the only file with price numbers)
 dashboard.py        # Self-contained HTML dashboard generator (Chart.js + flatpickr inlined)
 test_pricing.py     # Tests for pricing.py (stdlib unittest)
 test_track_tokens.py  # Tests for parsing, de-duplication, sources, dates and projects
 test_dashboard.py   # Tests for the dashboard page (date helpers run under node when installed)
 test_app.py         # Tests for the desktop window (pywebview stubbed)
+test_statusline.py  # Tests for the bridge, its install and the command in bash
+test_limits.py      # Tests for the share estimate
 build.py            # PyInstaller build script (macOS/Linux/Windows)
 gen_icon.py         # App icon generator (macOS-only, uses AppKit)
 assets/             # Chart.js, flatpickr, icons — inlined/bundled into the app

@@ -17,6 +17,17 @@ WSL_SHARES = ("\\\\wsl.localhost", "\\\\wsl$")
 _WINDOWS_APPS = re.compile(r"^(/.+/Users/[^/]+)/AppData/Local/Microsoft/WindowsApps/?$", re.IGNORECASE)
 
 
+def data_dir(platform: str, env: Mapping[str, str], home: Path) -> Path:
+    """The tracker's folder in the user's data folder: a packaged app's report and the status line samples go here."""
+    if platform == "win32":
+        base = Path(env["LOCALAPPDATA"]) if env.get("LOCALAPPDATA") else home / "AppData" / "Local"
+    elif platform == "darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(env["XDG_DATA_HOME"]) if env.get("XDG_DATA_HOME") else home / ".local" / "share"
+    return base / "claude-token-tracker"
+
+
 def warn_skipping(path: Path | str, exc: OSError) -> None:
     """One stderr line for a folder or file that cannot be read: the total leaves it out, so the user must know."""
     print(f"claude-token-tracker: skipping {path} ({exc.strerror or exc})", file=sys.stderr)

@@ -21,6 +21,7 @@ import webbrowser
 from pathlib import Path, PurePath
 from typing import Callable, Mapping
 
+import limits
 import track_tokens
 from track_tokens import TranscriptsNotFound, build_report, print_summary, save_report
 from dashboard import generate_html, ASSETS_DIR
@@ -155,6 +156,7 @@ def scan_and_report() -> tuple[dict, str]:
     print(f"Found {len(all_entries):,} responses across {len(project_totals)} projects")
 
     report = build_report(all_entries, project_totals, date_filter=None)
+    report["limits"] = limits.report(all_entries)
 
     save_report(report)
     print_summary(report)
