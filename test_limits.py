@@ -44,6 +44,10 @@ def five(result):
     return [w for w in result["windows"] if w["kind"] == "five_hour"]
 
 
+def weeks(result):
+    return [w for w in result["windows"] if w["kind"] == "seven_day"]
+
+
 class TestShare(unittest.TestCase):
     def test_only_claude_code_is_the_whole_rise(self):
         rows = [sample(60, five=2), sample(120, five=4), sample(180, five=6)]
@@ -127,6 +131,32 @@ class TestShare(unittest.TestCase):
         self.assertEqual(windows[R5]["claude_code_pct"], 2.0)
         unknown = five(share(rows, [call(55, session="a"), call(290, session="no-bridge")]))
         self.assertEqual({w["resets_at"]: w["claude_code_pct"] for w in unknown}[R5], 4.0)
+
+    def test_an_account_switch_with_the_same_reset_time_starts_a_new_window(self):
+        """15-10: both accounts' weekly windows reset Sat 00:00Z, so the old account's 99 % stayed on after the switch."""
+        rows = [sample(60, seven=98), sample(120, seven=99, session="s2"),
+                sample(600, seven=0), sample(900, seven=1, session="s2"), sample(1200, seven=2)]
+        result = share(rows, [call(55), call(115, session="s2"), call(595), call(895, session="s2"), call(1195)])
+        weekly = weeks(result)
+        self.assertEqual([w["account_pct"] for w in weekly], [2.0, 99.0])
+        self.assertEqual([w["current"] for w in weekly], [True, False])
+        # The new account counts from its first reading: the calls before it went to the old account.
+        self.assertEqual(result["current"]["seven_day"]["claude_code_pct"], 2.0)
+
+    def test_readings_far_below_but_not_three_in_a_row_are_stale(self):
+        """14-10: idle sessions re-ran their status line with 67 % while the account stood at 77 %."""
+        rows = [sample(60, seven=77), sample(70, seven=67, session="idle"), sample(80, seven=66, session="idle2"),
+                sample(130, seven=78), sample(140, seven=60, session="idle3")]
+        self.assertEqual([w["account_pct"] for w in weeks(share(rows, [call(55), call(125)]))], [78.0])
+
+    def test_after_a_switch_an_idle_session_of_the_old_account_is_left_out(self):
+        """An idle session repeats its own last reading, here the old account's 98 %."""
+        rows = [sample(60, seven=98, session="idle"), sample(120, seven=99),
+                sample(600, seven=0), sample(900, seven=1), sample(1200, seven=2),
+                sample(1300, seven=98, session="idle"), sample(1500, seven=3)]
+        result = share(rows, [call(55, session="idle"), call(115), call(595), call(895), call(1195), call(1495)])
+        current = result["current"]["seven_day"]
+        self.assertEqual((current["account_pct"], current["claude_code_pct"]), (3.0, 3.0))
 
     def test_unpriced_calls_still_mark_a_gap(self):
         rows = [sample(60, five=2)]

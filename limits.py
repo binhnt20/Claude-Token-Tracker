@@ -12,7 +12,8 @@ of this computer fall inside the gap:
 - a gap with no Claude Code call (chat in a break, another device): nothing.
 
 The window start (`resets_at` minus its length, give or take the hour `resets_at` is rounded to) counts as 0 %. The
-result never exceeds the account %.
+result never exceeds the account %. Two accounts may share a reset time: after a switch the readings drop, and the
+new account gets its own window, counted from its first reading.
 """
 
 from __future__ import annotations
@@ -37,6 +38,11 @@ SAME_WINDOW_S = 600  # reset times this close name one window
 # Claude Code reports resets_at rounded to the hour, so a window may open up to an hour before resets_at minus its
 # length: the first gap also takes the calls of that hour.
 ROUNDING_S = 3600
+# An account switch shows only as a drop when both accounts reset at the same time (15-10: weekly, Sat 00:00Z).
+# SWITCH_CONFIRM readings in a row SWITCH_DROP points or more below the account's level are the new account; fewer are
+# idle sessions re-running their status line with an older value (14-10: 67 % while the account stood at 77 %).
+SWITCH_DROP = 10
+SWITCH_CONFIRM = 3
 
 
 def _epoch(text) -> float | None:
@@ -85,8 +91,9 @@ def read_samples(paths: Iterable[Path]) -> list[dict]:
 
 
 def _windows(samples: list[dict], kind: str) -> list[dict]:
-    """Samples of one kind grouped by reset time: [{resets_at, points: [(t, pct)], sessions}]."""
-    windows: list[dict] = []
+    """Samples of one kind grouped by reset time, then by account (_accounts):
+    [{resets_at, points: [(t, pct)], sessions, opens, live}]."""
+    groups: list[dict] = []
     for s in samples:
         reading = s.get(kind)
         if not isinstance(reading, dict) or not isinstance(reading.get("pct"), (int, float)):
@@ -94,14 +101,59 @@ def _windows(samples: list[dict], kind: str) -> list[dict]:
         resets_at = reading.get("resets_at")
         if not isinstance(resets_at, (int, float)):
             continue
-        window = next((w for w in windows if abs(w["resets_at"] - resets_at) <= SAME_WINDOW_S), None)
-        if window is None:
-            window = {"resets_at": resets_at, "points": [], "sessions": set()}
-            windows.append(window)
-        window["resets_at"] = resets_at
-        window["points"].append((s["_t"], float(reading["pct"])))
-        window["sessions"].add(s.get("session_id"))
-    return windows
+        group = next((g for g in groups if abs(g["resets_at"] - resets_at) <= SAME_WINDOW_S), None)
+        if group is None:
+            group = {"resets_at": resets_at, "readings": []}
+            groups.append(group)
+        group["resets_at"] = resets_at
+        group["readings"].append((s["_t"], float(reading["pct"]), s.get("session_id")))
+    return [w for g in groups for w in _accounts(g["resets_at"], g["readings"])]
+
+
+def _accounts(resets_at: float, readings: list[tuple]) -> list[dict]:
+    """One window per account among the time-sorted (t, pct, session) readings of one reset time. A lower reading is
+    a stale re-run and stays with the account, unless SWITCH_CONFIRM in a row sit SWITCH_DROP points below its level:
+    they open the next account. After a switch, a session repeating its own reading above the level is an idle session
+    of an earlier account and is left out. `opens`: the window starts at 0 % (first account); `live`: the last one."""
+    accounts: list[dict] = []
+    low: list[tuple] = []
+    last_own: dict = {}
+
+    def add(account: dict, t: float, pct: float, session) -> None:
+        account["points"].append((t, pct))
+        account["sessions"].add(session)
+        account["level"] = max(account["level"], pct)
+
+    def open_account(batch: list[tuple]) -> None:
+        account = {"resets_at": resets_at, "points": [], "sessions": set(), "level": 0.0, "opens": not accounts}
+        for reading in batch:
+            add(account, *reading)
+        accounts.append(account)
+
+    for t, pct, session in readings:
+        own, last_own[session] = last_own.get(session), pct
+        if not accounts:
+            open_account([(t, pct, session)])
+            continue
+        account = accounts[-1]
+        if len(accounts) > 1 and pct > account["level"] and pct == own:
+            continue
+        if pct <= account["level"] - SWITCH_DROP:
+            low.append((t, pct, session))
+            if len(low) >= SWITCH_CONFIRM:
+                open_account(low)
+                low = []
+            continue
+        if pct >= account["level"]:
+            for reading in low:
+                add(account, *reading)
+            low = []
+        add(account, t, pct, session)
+    for reading in low:
+        add(accounts[-1], *reading)
+    for account in accounts:
+        account["live"] = account is accounts[-1]
+    return accounts
 
 
 class _Calls:
@@ -132,17 +184,19 @@ class _Calls:
 
 
 def _gaps(window: dict, length: int, calls: _Calls, excluded: set) -> list[tuple[float, float, int, float]]:
-    """(rise, seconds, calls, dollars) for each pair of consecutive points, from the 0 % window start."""
+    """(rise, seconds, calls, dollars) for each pair of consecutive points, from the 0 % window start (from the first
+    reading for an account switched to inside the window)."""
     points = sorted(window["points"])
-    start = min(window["resets_at"] - length, points[0][0])
-    kept, running = [(start, 0.0)], 0.0
-    for t, pct in points:
+    opens = window["opens"]
+    first = (min(window["resets_at"] - length, points[0][0]), 0.0) if opens else points[0]
+    kept, running = [first], first[1]
+    for t, pct in points if opens else points[1:]:
         if pct >= running:  # lower = a stale re-run of an older value
             kept.append((t, pct))
             running = pct
     gaps = []
     for i, ((t0, p0), (t1, p1)) in enumerate(zip(kept, kept[1:])):
-        low = t0 - ROUNDING_S if i == 0 else t0 + CALL_SLACK_S
+        low = t0 - ROUNDING_S if i == 0 and opens else t0 + CALL_SLACK_S
         n, usd = calls.between(low, t1 + CALL_SLACK_S, excluded)
         gaps.append((p1 - p0, t1 - t0, n, usd))
     return gaps
@@ -181,9 +235,9 @@ def claude_code_share(samples: list[dict], entries: Iterable[dict], now: float) 
                 "estimated_pct": round(estimated, 2),
                 "as_of": _iso(max(t for t, _pct in w["points"])),
                 "samples": len(w["points"]),
-                "current": w["resets_at"] > now,
+                "current": w["resets_at"] > now and w["live"],
             })
-    result["windows"].sort(key=lambda w: w["resets_at"], reverse=True)
+    result["windows"].sort(key=lambda w: (w["resets_at"], w["as_of"]), reverse=True)
     for w in result["windows"]:
         if w["current"] and result["current"][w["kind"]] is None:
             result["current"][w["kind"]] = w
