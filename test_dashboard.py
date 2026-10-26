@@ -367,7 +367,8 @@ class TestLimitsBox(unittest.TestCase):
         html = dashboard.limits_html({"limits": self.limits(stale_logs=[self.STALE])})
         self.assertEqual(html.count('class="limit-warning"'), 1)
         self.assertIn("No samples in /mnt/c/&lt;u&gt;/limits.jsonl since", html)
-        self.assertIn("python statusline.py --install", html)
+        self.assertIn("Run <code>python statusline.py --install</code> there again.", html)
+        self.assertNotIn("`", html)
         self.assertNotIn('class="limit-warning"', dashboard.limits_html({"limits": self.limits()}))
 
     def test_no_limits_key_renders_nothing(self):

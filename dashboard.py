@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html as html_lib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -185,7 +186,8 @@ def limits_html(report: dict) -> str:
         rows.append(f'<div class="limit-row">{value}<div class="limit-text">{esc(text)}</div></div>')
     if not rows:
         rows.append(f'<div class="limit-row"><div class="limit-text">{esc(limits.summary_lines(share)[0])}</div></div>')
-    rows += [f'<div class="limit-warning">{esc(line)}</div>' for line in limits.stale_lines(share)]
+    rows += [f'<div class="limit-warning">{re.sub(r"`([^`]+)`", r"<code>\1</code>", esc(line))}</div>'
+             for line in limits.stale_lines(share)]
     table = ""
     if share.get("windows"):
         cells = "".join(
@@ -311,7 +313,8 @@ tr:hover td {{ background: var(--surface2); }}
 .limit-value {{ font-size: 24px; font-weight: 700; color: var(--accent); min-width: 84px;
   font-variant-numeric: tabular-nums; }}
 .limit-text {{ font-size: 14px; }}
-.limit-warning {{ color: var(--orange); font-size: 13px; margin: 8px 0; overflow-wrap: anywhere; }}
+.limit-warning {{ font-size: 13px; margin: 10px 0; padding-left: 10px; border-left: 3px solid var(--orange);
+  overflow-wrap: anywhere; }}
 .limit-note {{ color: var(--text2); font-size: 12px; margin-top: 10px; overflow-wrap: anywhere; }}
 .limits-box summary {{ color: var(--text2); font-size: 13px; cursor: pointer; margin-top: 10px; }}
 .limits-box table {{ margin-top: 8px; }}
