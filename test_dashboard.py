@@ -360,6 +360,16 @@ class TestLimitsBox(unittest.TestCase):
                                                  "logs": []}})
         self.assertIn("python statusline.py --install", html)
 
+    STALE = {"log": "/mnt/c/<u>/limits.jsonl", "last_sample": "2026-10-14T23:56:36.783Z",
+             "last_call": "2026-10-26T14:00:00.000Z", "enable": "python statusline.py --install"}
+
+    def test_stale_log_warning(self):
+        html = dashboard.limits_html({"limits": self.limits(stale_logs=[self.STALE])})
+        self.assertEqual(html.count('class="limit-warning"'), 1)
+        self.assertIn("No samples in /mnt/c/&lt;u&gt;/limits.jsonl since", html)
+        self.assertIn("python statusline.py --install", html)
+        self.assertNotIn('class="limit-warning"', dashboard.limits_html({"limits": self.limits()}))
+
     def test_no_limits_key_renders_nothing(self):
         self.assertEqual(dashboard.limits_html(MINIMAL_REPORT), "")
 

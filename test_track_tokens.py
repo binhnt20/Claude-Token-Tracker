@@ -484,6 +484,19 @@ class TestPrintSummary(TranscriptCase):
         self.assertIn("CLAUDE CODE SHARE OF PLAN LIMITS (estimate)", out.getvalue())
         self.assertIn("python3 statusline.py --install", out.getvalue())
 
+    def test_stale_log_warning_line(self):
+        report = build_report([], {})
+        report["limits"] = {"windows": [], "current": {"five_hour": None, "seven_day": None}, "samples": 3,
+                            "enable": "python3 statusline.py --install", "logs": [],
+                            "stale_logs": [{"log": "/mnt/c/u/limits.jsonl", "last_sample": "2026-10-14T23:56:36.783Z",
+                                            "last_call": "2026-10-26T14:00:00.000Z",
+                                            "enable": "python statusline.py --install"}]}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            track_tokens.print_summary(report)
+        self.assertIn("No samples in /mnt/c/u/limits.jsonl since", out.getvalue())
+        self.assertIn("Run `python statusline.py --install` there again.", out.getvalue())
+
     def test_non_ascii_project_on_a_cp1252_stdout(self):
         """A redirected Windows stdout is cp1252; a Vietnamese folder name must not crash the summary."""
         self.write([assistant_line(cwd="D:\\Dự án\\repo")], folder="D--D--n-repo")

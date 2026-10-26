@@ -502,7 +502,7 @@ def print_summary(report: dict, today: str | None = None):
 
     if "limits" in report:
         print("\n  CLAUDE CODE SHARE OF PLAN LIMITS (estimate):")
-        for line in limits.summary_lines(report["limits"]):
+        for line in limits.summary_lines(report["limits"]) + limits.stale_lines(report["limits"]):
             print(f"    {line}")
 
     print("=" * 60)

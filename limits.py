@@ -43,6 +43,9 @@ ROUNDING_S = 3600
 # idle sessions re-running their status line with an older value (14-10: 67 % while the account stood at 77 %).
 SWITCH_DROP = 10
 SWITCH_CONFIRM = 3
+# Calls this long after a log's last sample mean that side's status line no longer runs the bridge (14-10: Orca
+# rewrote it, and the Windows log stayed silent for 12 days).
+STALE_AFTER_S = 86400
 
 
 def _epoch(text) -> float | None:
@@ -265,11 +268,54 @@ def report(entries: Iterable[dict], env: Mapping[str, str] | None = None, home: 
     platform = sys.platform if platform is None else platform
     if other_homes is None:
         other_homes = other_side_homes(env, platform)
+    entries = list(entries)
     paths = log_paths(env, platform, home, other_homes)
-    share = claude_code_share(read_samples(paths), entries, time.time() if now is None else now)
+    per_log = [read_samples([p]) for p in paths]
+    samples = sorted((s for log in per_log for s in log), key=lambda s: s["_t"])
+    share = claude_code_share(samples, entries, time.time() if now is None else now)
     share["logs"] = [str(p) for p in paths]
-    share["enable"] = f"{'python' if platform == 'win32' else 'python3'} statusline.py --install"
+    share["enable"] = _enable(platform)
+    other = "win32" if platform.startswith("linux") else "linux"
+    sides = [(None, platform)] + [(h, other) for h in other_homes]
+    share["stale_logs"] = [stale for path, log, (side_home, side_platform) in zip(paths, per_log, sides)
+                           if (stale := _stale(path, log, _last_call(entries, side_home, other_homes), side_platform))]
     return share
+
+
+def _enable(platform: str) -> str:
+    return f"{'python' if platform == 'win32' else 'python3'} statusline.py --install"
+
+
+def _last_call(entries: list[dict], side_home: Path | None, other_homes: Iterable[Path]) -> float | None:
+    """The newest call read from one side: under side_home, or for this side (None) under none of the other homes."""
+    def under(path: Path, home: Path) -> bool:
+        return path == home or home in path.parents
+
+    def on_side(source: str) -> bool:
+        path = Path(source)
+        if side_home is not None:
+            return under(path, side_home)
+        return not any(under(path, h) for h in other_homes)
+
+    times = [t for e in entries if on_side(e.get("source", "")) and (t := _epoch(e.get("timestamp"))) is not None]
+    return max(times, default=None)
+
+
+def _stale(path: Path, log: list[dict], last_call: float | None, platform: str) -> dict | None:
+    if not log or last_call is None or last_call - log[-1]["_t"] <= STALE_AFTER_S:
+        return None
+    return {"log": str(path), "last_sample": _iso(log[-1]["_t"]), "last_call": _iso(last_call),
+            "enable": _enable(platform)}
+
+
+def stale_lines(share: dict, tz: tzinfo | None = None) -> list[str]:
+    """One warning per log whose side kept using Claude Code after its samples stopped."""
+    def local(text: str) -> str:
+        return datetime.fromtimestamp(_epoch(text), timezone.utc).astimezone(tz).strftime("%d %b %H:%M")
+
+    return [f"No samples in {s['log']} since {local(s['last_sample'])}, though Claude Code ran on that side until "
+            f"{local(s['last_call'])}: its status line no longer runs the bridge (another tool may have replaced it). "
+            f"Run `{s['enable']}` there again." for s in share.get("stale_logs", [])]
 
 
 def summary_lines(share: dict, tz: tzinfo | None = None) -> list[str]:
