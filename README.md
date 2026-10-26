@@ -29,7 +29,7 @@ python3 -m venv ~/.venvs/ctt
 
 If Qt names another missing system library, the full `apt` list is in [DEPLOY.md](DEPLOY.md) (Linux section).
 
-The window opens at once on a "Scanning Claude Code transcripts…" page, which counts the files read ("Read 1,724 of 2,966 transcript files"), and shows the dashboard when the scan ends (a few seconds per GB of local transcripts; the other side of a Windows + WSL computer is slower).
+The window opens at once on a "Scanning Claude Code transcripts…" page, which counts the files read ("Read 1,724 of 2,966 transcript files"), and shows the dashboard when the scan ends (a few seconds per GB of local transcripts; the other side of a Windows + WSL computer is slower). Launching it again while it is open does nothing: the second copy closes at once instead of starting a second scan.
 
 `app.py` always scans **all-time** data — no CLI date args (only `-h`/`--help`, and `--install`/`--uninstall` in the Linux AppImage, are recognized; other args are ignored). Date filtering happens **inside the dashboard UI**: Today / Yesterday / Last 7 days / Last 30 days (both end today, and the chart keeps days without usage) / All time (every day in the data) / Custom range.
 

@@ -23,6 +23,7 @@ from typing import Callable, Mapping
 
 import limits
 import track_tokens
+from sources import data_dir
 from track_tokens import TranscriptsNotFound, build_report, print_summary, save_report
 from dashboard import generate_html, ASSETS_DIR
 
@@ -350,6 +351,58 @@ def open_in_browser(html: str):
     webbrowser.open(html_path.as_uri())
 
 
+LOCK_NAME = "app.lock"
+_instance_lock = None
+
+
+def lock_path() -> Path:
+    return data_dir(sys.platform, os.environ, Path.home()) / LOCK_NAME
+
+
+def _lock(path: Path):
+    """An open handle holding an OS lock on path, or None when another handle holds it. The OS drops the lock when
+    the process ends, so a crash leaves nothing stale. Raises OSError when the file cannot be opened."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def hold_single_instance(path: Path | None = None) -> bool:
+    """False when another app on this side is open: two clicks ran two full scans side by side.
+
+    A lock file that cannot be made does not stop the app: two scans are better than no window.
+    """
+    global _instance_lock
+    if _instance_lock is not None:
+        return True
+    try:
+        handle = _lock(lock_path() if path is None else path)
+    except OSError:
+        return True
+    if handle is None:
+        return False
+    _instance_lock = handle
+    return True
+
+
+def release_single_instance() -> None:
+    global _instance_lock
+    if _instance_lock is not None:
+        _instance_lock.close()
+        _instance_lock = None
+
+
 def main():
     track_tokens.safe_console()
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
@@ -364,6 +417,10 @@ def main():
 
     if len(sys.argv) > 1 and sys.argv[1] == "--uninstall":
         _uninstall_desktop_entry()
+        sys.exit(0)
+
+    if not hold_single_instance():
+        print(f"{APP_NAME} is already open; this second copy closes.", file=sys.stderr)
         sys.exit(0)
 
     page = once(scan_page)

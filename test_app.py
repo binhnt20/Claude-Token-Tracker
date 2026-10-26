@@ -32,6 +32,21 @@ except (ImportError, ValueError):
     Gio = GLib = None
 
 
+_LOCK_DIR = tempfile.TemporaryDirectory()
+_lock_patch = mock.patch.object(app, "lock_path", return_value=Path(_LOCK_DIR.name, "app.lock"))
+
+
+def setUpModule():
+    """main() takes the single-instance lock: keep it off the user's data folder, where a running app holds it."""
+    _lock_patch.start()
+
+
+def tearDownModule():
+    _lock_patch.stop()
+    app.release_single_instance()
+    _LOCK_DIR.cleanup()
+
+
 class FakeWindow:
     def __init__(self):
         self.events = types.SimpleNamespace(closed=threading.Event())
@@ -417,6 +432,59 @@ class TestNoTranscripts(unittest.TestCase):
         self.assertIn(html_lib.escape(str(folders[1])), page)
         self.assertIn("&lt;odd&gt;", page)
         self.assertIn("CLAUDE_CONFIG_DIR", page)
+
+
+class TestSingleInstance(unittest.TestCase):
+    """Two clicks on the launcher ran two full scans of the whole history side by side, each one slower."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.lock = Path(tmp.name, "claude-token-tracker", "app.lock")
+        app.release_single_instance()
+        self.addCleanup(app.release_single_instance)
+
+    def run_main(self):
+        err = io.StringIO()
+        with mock.patch.object(app, "lock_path", return_value=self.lock), \
+                mock.patch.object(app, "open_native_window") as window, \
+                mock.patch.object(app.sys, "argv", ["app.py"]), contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                app.main()
+        return window, caught.exception.code, err.getvalue()
+
+    def other_app(self):
+        """The first app: a second handle on the lock file, held as another process would hold it."""
+        held = app._lock(self.lock)
+        self.assertIsNotNone(held)
+        self.addCleanup(held.close)
+        return held
+
+    def test_a_second_app_exits_while_the_first_runs(self):
+        self.other_app()
+        window, code, err = self.run_main()
+        window.assert_not_called()
+        self.assertEqual(code, 0)
+        self.assertIn("already open", err)
+
+    def test_the_first_app_opens_and_holds_the_lock(self):
+        with mock.patch.object(app, "lock_path", return_value=self.lock), \
+                mock.patch.object(app, "open_native_window") as window, \
+                mock.patch.object(app.sys, "argv", ["app.py"]), contextlib.redirect_stdout(io.StringIO()):
+            app.main()
+        window.assert_called_once()
+        self.assertIsNone(app._lock(self.lock), "held until the process ends")
+        app.release_single_instance()
+        held = app._lock(self.lock)
+        self.assertIsNotNone(held)
+        held.close()
+
+    def test_a_folder_it_cannot_write_does_not_stop_the_app(self):
+        blocker = self.lock.parent
+        blocker.parent.mkdir(parents=True, exist_ok=True)
+        blocker.write_text("a file where the folder should be", encoding="utf-8")
+        self.assertTrue(app.hold_single_instance(self.lock))
 
 
 class TestFallbackScan(unittest.TestCase):
