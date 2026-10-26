@@ -100,19 +100,25 @@ def transcript_candidates(env: Mapping[str, str] | None = None, home: Path | Non
                           platform: str | None = None, other_homes: list[Path] | None = None) -> list[Path]:
     """Every `projects` directory Claude Code may write to, whether it exists or not, in order.
 
-    CLAUDE_CONFIG_DIR (a comma-separated list) replaces the defaults; otherwise both the legacy
-    ~/.claude and the XDG ~/.config/claude locations are read, since installs have used each, in this home and
-    in the homes of the other side of a Windows + WSL machine.
+    CLAUDE_TOKEN_TRACKER_DIRS (a comma-separated list) replaces every default. CLAUDE_CONFIG_DIR (also a list) comes
+    first and keeps the defaults: account switchers such as Orca set it in every shell, so it does not mean "only
+    here". The defaults are the legacy ~/.claude and the XDG ~/.config/claude locations, since installs have used
+    each, in this home and in the homes of the other side of a Windows + WSL machine.
     """
     env = os.environ if env is None else env
     home = Path.home() if home is None else home
 
-    config_dirs = [part.strip() for part in env.get("CLAUDE_CONFIG_DIR", "").split(",") if part.strip()]
-    if config_dirs:
-        return [Path(d).expanduser() / "projects" for d in config_dirs]
+    only = _dir_list(env.get("CLAUDE_TOKEN_TRACKER_DIRS", ""))
+    if only:
+        return [d / "projects" for d in only]
     if other_homes is None:
         other_homes = other_side_homes(env, sys.platform if platform is None else platform)
-    return [h / sub / "projects" for h in [home, *other_homes] for sub in (Path(".claude"), Path(".config", "claude"))]
+    defaults = [h / sub for h in [home, *other_homes] for sub in (Path(".claude"), Path(".config", "claude"))]
+    return [d / "projects" for d in [*_dir_list(env.get("CLAUDE_CONFIG_DIR", "")), *defaults]]
+
+
+def _dir_list(value: str) -> list[Path]:
+    return [Path(part.strip()).expanduser() for part in value.split(",") if part.strip()]
 
 
 def transcript_roots(env: Mapping[str, str] | None = None, home: Path | None = None,

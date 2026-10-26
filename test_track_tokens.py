@@ -253,7 +253,7 @@ class TestCollectAllEntries(TranscriptCase):
 
     def test_not_found_names_every_folder_looked_in(self):
         missing = [Path(self.tmp.name) / "a", Path(self.tmp.name) / "b"]
-        env = {"CLAUDE_CONFIG_DIR": ",".join(str(m) for m in missing)}
+        env = {"CLAUDE_TOKEN_TRACKER_DIRS": ",".join(str(m) for m in missing)}
         with mock.patch.dict(os.environ, env), self.assertRaises(TranscriptsNotFound) as caught:
             collect_all_entries()
         self.assertEqual(caught.exception.candidates, [m / "projects" for m in missing])
@@ -513,11 +513,17 @@ class TestSources(unittest.TestCase):
         env = {"CLAUDE_CONFIG_DIR": f"{self.base / 'a'},{self.base / 'b'}"}
         self.assertEqual(transcript_roots(env=env, home=self.base / "home"), [a, b])
 
-    def test_config_dir_replaces_the_defaults(self):
-        (only,) = self.mkdirs("a/projects")
-        self.mkdirs("home/.claude/projects")
+    def test_config_dir_comes_before_the_defaults(self):
+        """Orca and other account switchers set CLAUDE_CONFIG_DIR in every shell: it must not hide ~/.claude."""
+        first, legacy = self.mkdirs("a/projects", "home/.claude/projects")
         env = {"CLAUDE_CONFIG_DIR": str(self.base / "a")}
-        self.assertEqual(transcript_roots(env=env, home=self.base / "home"), [only])
+        self.assertEqual(transcript_roots(env=env, home=self.base / "home", other_homes=[]), [first, legacy])
+
+    def test_tracker_dirs_replace_every_default(self):
+        (only,) = self.mkdirs("a/projects")
+        self.mkdirs("home/.claude/projects", "b/projects")
+        env = {"CLAUDE_TOKEN_TRACKER_DIRS": str(self.base / "a"), "CLAUDE_CONFIG_DIR": str(self.base / "b")}
+        self.assertEqual(transcript_roots(env=env, home=self.base / "home", other_homes=[]), [only])
 
     def test_default_reads_both_home_dirs(self):
         legacy, xdg = self.mkdirs("home/.claude/projects", "home/.config/claude/projects")
@@ -528,6 +534,10 @@ class TestSources(unittest.TestCase):
         self.assertEqual(transcript_candidates(env={}, home=home, other_homes=[]),
                          [home / ".claude" / "projects", home / ".config" / "claude" / "projects"])
         env = {"CLAUDE_CONFIG_DIR": f"{self.base / 'a'}, {self.base / 'b'}"}
+        self.assertEqual(transcript_candidates(env=env, home=home, other_homes=[]),
+                         [self.base / "a" / "projects", self.base / "b" / "projects",
+                          home / ".claude" / "projects", home / ".config" / "claude" / "projects"])
+        env = {"CLAUDE_TOKEN_TRACKER_DIRS": f"{self.base / 'a'}, {self.base / 'b'}"}
         self.assertEqual(transcript_candidates(env=env, home=home),
                          [self.base / "a" / "projects", self.base / "b" / "projects"])
 
@@ -579,8 +589,16 @@ class TestSources(unittest.TestCase):
     def test_a_windows_path_means_nothing_off_linux(self):
         self.assertEqual(other_side_homes({"PATH": self.WINDOWS_PATH}, "darwin"), [])
 
-    def test_config_dir_also_replaces_the_other_side(self):
+    def test_config_dir_keeps_the_other_side(self):
+        home, windows = self.base / "home", Path("/mnt/c/Users/me")
         env = {"CLAUDE_CONFIG_DIR": str(self.base / "a"), "PATH": self.WINDOWS_PATH}
+        self.assertEqual(transcript_candidates(env=env, home=home, platform="linux"),
+                         [self.base / "a" / "projects", home / ".claude" / "projects",
+                          home / ".config" / "claude" / "projects",
+                          windows / ".claude" / "projects", windows / ".config" / "claude" / "projects"])
+
+    def test_tracker_dirs_also_replace_the_other_side(self):
+        env = {"CLAUDE_TOKEN_TRACKER_DIRS": str(self.base / "a"), "PATH": self.WINDOWS_PATH}
         self.assertEqual(transcript_candidates(env=env, home=self.base / "home", platform="linux"),
                          [self.base / "a" / "projects"])
 

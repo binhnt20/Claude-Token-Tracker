@@ -6,7 +6,7 @@
 claude-token-tracker/
 ├── app.py                  # Entry point chính (+ --install/--uninstall trên Linux)
 ├── track_tokens.py         # Đọc transcript, gộp token + chi phí theo ngày, model, project
-├── sources.py              # Tìm thư mục transcript: ~/.claude/projects, ~/.config/claude/projects, hoặc CLAUDE_CONFIG_DIR
+├── sources.py              # Tìm thư mục transcript: ~/.claude/projects, ~/.config/claude/projects, cộng CLAUDE_CONFIG_DIR; CLAUDE_TOKEN_TRACKER_DIRS thay tất cả
 ├── pricing.py              # Bảng giá + tính chi phí (API-equivalent)
 ├── dashboard.py            # Sinh HTML dashboard với Chart.js + flatpickr
 ├── test_pricing.py         # Test cho pricing.py (unittest)
