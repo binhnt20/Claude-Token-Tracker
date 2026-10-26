@@ -15,8 +15,9 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path, PurePath
 
+import limits
 from pricing import COST_PARTS, cost_usd, normalize_model
-from sources import iter_transcripts, transcript_candidates, transcript_roots, warn_skipping
+from sources import data_dir, iter_transcripts, transcript_candidates, transcript_roots, warn_skipping
 
 # Kept for callers that import it; collect_all_entries reads every root from sources.transcript_roots().
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
@@ -28,13 +29,7 @@ def report_path(frozen: bool, platform: str, env: Mapping[str, str], home: Path,
     user's data folder instead."""
     if not frozen:
         return here / "token_usage.json"
-    if platform == "win32":
-        base = Path(env["LOCALAPPDATA"]) if env.get("LOCALAPPDATA") else home / "AppData" / "Local"
-    elif platform == "darwin":
-        base = home / "Library" / "Application Support"
-    else:
-        base = Path(env["XDG_DATA_HOME"]) if env.get("XDG_DATA_HOME") else home / ".local" / "share"
-    return base / "claude-token-tracker" / "token_usage.json"
+    return data_dir(platform, env, home) / "token_usage.json"
 
 
 OUTPUT_FILE = report_path(getattr(sys, "frozen", False), sys.platform, os.environ, Path.home(), Path(__file__).parent)
@@ -505,6 +500,11 @@ def print_summary(report: dict, today: str | None = None):
             print(f"    {name:<40} {total_tokens(stats):>10,} tokens "
                   f"({stats['requests']:,} reqs) {cost_str}")
 
+    if "limits" in report:
+        print("\n  CLAUDE CODE SHARE OF PLAN LIMITS (estimate):")
+        for line in limits.summary_lines(report["limits"]):
+            print(f"    {line}")
+
     print("=" * 60)
 
 
@@ -562,6 +562,7 @@ def main():
     print(f"Found {len(all_entries):,} assistant responses across {len(project_totals)} projects\n")
 
     report = build_report(all_entries, project_totals, date_filter)
+    report["limits"] = limits.report(all_entries)
     saved = save_report(report)
     print_summary(report)
     if saved:
