@@ -11,7 +11,7 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path, PurePath
 
@@ -317,8 +317,8 @@ def aggregate(entries: list[dict], date_filter: str | None = None) -> tuple[dict
     return dict(by_date), dict(by_date_project)
 
 
-def collect_all_entries() -> tuple[list[dict], dict]:
-    """Scan all projects and collect token usage entries."""
+def collect_all_entries(progress: Callable[[int, int], None] | None = None) -> tuple[list[dict], dict]:
+    """Scan all projects and collect token usage entries; progress(files read, files) after the listing and each file."""
     all_entries = []
     project_totals = defaultdict(new_stats)
 
@@ -326,13 +326,17 @@ def collect_all_entries() -> tuple[list[dict], dict]:
     if not roots:
         raise TranscriptsNotFound(transcript_candidates())
 
+    files = [(root, dir_name, jsonl_file) for root in roots for dir_name, jsonl_file in iter_transcripts(root)]
+    if progress:
+        progress(0, len(files))
     by_dir = defaultdict(list)
-    for root in roots:
-        for dir_name, jsonl_file in iter_transcripts(root):
-            records = parse_transcript(jsonl_file)
-            for record in records:
-                record["source"] = str(root)
-            by_dir[dir_name].extend(records)
+    for done, (root, dir_name, jsonl_file) in enumerate(files, 1):
+        records = parse_transcript(jsonl_file)
+        for record in records:
+            record["source"] = str(root)
+        by_dir[dir_name].extend(records)
+        if progress:
+            progress(done, len(files))
 
     for dir_name, records in by_dir.items():
         project_name = project_display_name(dir_name, {r["cwd"] for r in records if r.get("cwd")})

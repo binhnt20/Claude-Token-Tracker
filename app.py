@@ -149,10 +149,10 @@ def _uninstall_desktop_entry():
         print("  Nothing to remove.")
 
 
-def scan_and_report() -> tuple[dict, str]:
+def scan_and_report(progress: Callable[[int, int], None] | None = None) -> tuple[dict, str]:
     """Scan transcripts, build report (no date filter - all data), return (report, html)."""
     print("Scanning Claude Code transcripts...")
-    all_entries, project_totals = track_tokens.collect_all_entries()
+    all_entries, project_totals = track_tokens.collect_all_entries(progress=progress)
     print(f"Found {len(all_entries):,} responses across {len(project_totals)} projects")
 
     report = build_report(all_entries, project_totals, date_filter=None)
@@ -189,31 +189,34 @@ SCANNING_HTML = ("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"
                  "color:#f1f5f9}@media (prefers-color-scheme: light){body{background:#f1f5f9;color:#1e293b}}</style>"
                  "</head><body><h1>Scanning Claude Code transcripts\u2026</h1>"
                  "<p>The dashboard opens here when the scan is done. A first scan of a long history can take a minute."
-                 "</p></body></html>")
+                 "</p><p id=\"progress\"></p><script>function setProgress(done, total) {"
+                 "document.getElementById('progress').textContent = 'Read ' + done.toLocaleString() + ' of ' + "
+                 "total.toLocaleString() + ' transcript files';}</script></body></html>")
 
 
-def scan_page() -> str:
+def scan_page(progress: Callable[[int, int], None] | None = None) -> str:
     """The dashboard, or a page that says where transcripts were looked for."""
     try:
-        _report, html = scan_and_report()
+        _report, html = scan_and_report(progress=progress)
     except TranscriptsNotFound as exc:
         print(exc, file=sys.stderr)
         html = not_found_html(exc)
     return html
 
 
-def once(make: Callable[[], str]) -> Callable[[], str]:
+def once(make: Callable[..., str]) -> Callable[..., str]:
     """make, run at most once: a fallback after the window already scanned reuses the page."""
     lock, result = threading.Lock(), []
 
-    def call() -> str:
+    def call(progress: Callable[[int, int], None] | None = None) -> str:
         with lock:
             if not result:
-                result.append(make())
+                result.append(make(progress))
             return result[0]
     return call
 
 
+PROGRESS_EVERY_S = 0.5
 PAGE_FOLDER_PREFIX = "claude-token-tracker-"
 STALE_PAGE_SECONDS = 24 * 60 * 60
 
@@ -269,7 +272,7 @@ def _write_page(folder: Path, html: str) -> Path:
     return page
 
 
-def open_native_window(make_html: Callable[[], str]):
+def open_native_window(make_html: Callable[[Callable[[int, int], None]], str]):
     """Open the dashboard in a native OS window using pywebview.
 
     The window opens at once on a "Scanning" page and make_html runs behind it, so a long first scan is not a minute
@@ -299,9 +302,22 @@ def open_native_window(make_html: Callable[[], str]):
             min_size=(800, 600),
         )
 
+        last_shown = [0.0]
+
+        def show_progress(done: int, total: int):
+            """At most twice a second (the first and the last always): each call waits for the page's answer."""
+            now = time.monotonic()
+            if window.events.closed.is_set() or (0 < done < total and now - last_shown[0] < PROGRESS_EVERY_S):
+                return
+            last_shown[0] = now
+            try:
+                window.evaluate_js(f"window.setProgress && setProgress({done}, {total})")
+            except Exception:
+                pass  # the page is not ready yet or already gone; the next call tries again
+
         def show_page():
             try:
-                html = make_html()
+                html = make_html(show_progress)
             except Exception as exc:
                 traceback.print_exc()
                 html = error_html(exc)

@@ -229,6 +229,14 @@ class TestLineQuality(TranscriptCase):
 
 
 class TestCollectAllEntries(TranscriptCase):
+    def test_progress_counts_files_after_listing_them_all(self):
+        self.write([assistant_line(msg_id="m1")], name="a.jsonl", folder="-work-a")
+        self.write([assistant_line(msg_id="m2")], name="b.jsonl", folder="-work-b")
+        seen = []
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[Path(self.tmp.name)]):
+            collect_all_entries(progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(0, 2), (1, 2), (2, 2)])
+
     def test_project_totals_count_each_call_once(self):
         self.write([assistant_line(output=8), assistant_line(output=471)], name="a.jsonl", folder="-work-repo")
         self.write([assistant_line(output=471)], name="b.jsonl", folder="-work-repo")
