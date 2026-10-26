@@ -532,7 +532,7 @@ class TestSources(unittest.TestCase):
     def test_config_dir_list(self):
         a, b = self.mkdirs("a/projects", "b/projects")
         env = {"CLAUDE_CONFIG_DIR": f"{self.base / 'a'},{self.base / 'b'}"}
-        self.assertEqual(transcript_roots(env=env, home=self.base / "home"), [a, b])
+        self.assertEqual(transcript_roots(env=env, home=self.base / "home", other_homes=[]), [a, b])
 
     def test_config_dir_comes_before_the_defaults(self):
         """Orca and other account switchers set CLAUDE_CONFIG_DIR in every shell: it must not hide ~/.claude."""
