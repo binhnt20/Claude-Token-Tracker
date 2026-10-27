@@ -287,6 +287,16 @@ class TestInstall(TempCase):
         self.assertEqual(self.read_settings(), {"statusLine": {"type": "command", "command": "orca"}})
         self.assertEqual(self.backups(), [])
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX file modes")
+    def test_install_and_uninstall_keep_the_settings_mode(self):
+        """A settings.json the user made private (it may hold API keys) stays private."""
+        self.write_settings({"statusLine": {"type": "command", "command": "orca"}})
+        self.settings.chmod(0o600)
+        self.install()
+        self.assertEqual(self.settings.stat().st_mode & 0o777, 0o600)
+        self.uninstall()
+        self.assertEqual(self.settings.stat().st_mode & 0o777, 0o600)
+
     def test_unreadable_settings_are_never_overwritten(self):
         text = self.write_settings('{"theme": "dark",')
         code, message = self.install()

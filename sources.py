@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 import stat
@@ -54,13 +55,24 @@ def windows_homes_on_path(path_var: str) -> list[Path]:
     return homes
 
 
+def wsl_exe(env: Mapping[str, str], exists: Callable[[str], bool] = os.path.exists) -> str:
+    """The system's wsl.exe by full path: by bare name Windows runs one planted in the app's or the current folder.
+
+    A 32-bit Python on 64-bit Windows sees System32 redirected to SysWOW64, which has no wsl.exe; Sysnative is the
+    real System32 for it, and exists for no other process.
+    """
+    root = env.get("SystemRoot") or r"C:\Windows"
+    sysnative = ntpath.join(root, "Sysnative", "wsl.exe")
+    return sysnative if exists(sysnative) else ntpath.join(root, "System32", "wsl.exe")
+
+
 def running_wsl_distros(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> list[str]:
     """Names of the WSL distributions running now; none when WSL is absent or fails.
 
     `--running` never starts a stopped distribution. wsl.exe writes UTF-16 unless WSL_UTF8=1 is set.
     """
     try:
-        result = run(["wsl.exe", "--list", "--running", "--quiet"], capture_output=True, timeout=10,
+        result = run([wsl_exe(os.environ), "--list", "--running", "--quiet"], capture_output=True, timeout=10,
                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError):
         return []

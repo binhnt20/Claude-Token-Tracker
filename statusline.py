@@ -189,6 +189,8 @@ def _write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
     tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if path.exists():
+        shutil.copymode(path, tmp)  # a settings.json made private (it may hold API keys) stays private
     os.replace(tmp, path)
 
 
