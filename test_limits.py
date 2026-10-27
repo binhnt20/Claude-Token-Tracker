@@ -30,10 +30,13 @@ def sample(offset, five=None, seven=None, session="s1", resets5=R5, resets7=R7):
     return row
 
 
-def call(offset, cost=1.0, session="s1"):
+def call(offset, cost=1.0, session="s1", source=None):
     """A transcript record: one Claude Code API call `offset` seconds after START."""
-    return {"timestamp": iso(START + offset), "session_id": session,
-            "cost": None if cost is None else {"input": cost, "total": cost}}
+    record = {"timestamp": iso(START + offset), "session_id": session,
+              "cost": None if cost is None else {"input": cost, "total": cost}}
+    if source is not None:
+        record["source"] = str(source)
+    return record
 
 
 def share(rows, calls, now=START + 3600):
@@ -231,6 +234,73 @@ class TestReport(unittest.TestCase):
         result = limits.report([], env={"LOCALAPPDATA": "/nowhere"}, home=Path("/nowhere"), platform="win32",
                                other_homes=[], now=START)
         self.assertEqual(result["enable"], "python statusline.py --install")
+
+
+DAY = 86400
+
+
+class TestStaleLogs(unittest.TestCase):
+    """A log that stops while Claude Code keeps running on its side: the bridge was removed (14-10: Orca rewrote
+    the status line, and 12 days of Windows samples were lost without a word)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.home, self.win = self.base / "home", self.base / "c" / "Users" / "me"
+        self.mine = self.home / ".claude" / "projects"
+        self.theirs = self.win / ".claude" / "projects"
+
+    def log(self, path, *rows):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        return path
+
+    def report(self, calls, other_homes=()):
+        return limits.report(calls, env={}, home=self.home, platform="linux", other_homes=list(other_homes),
+                             now=START + 3 * DAY)
+
+    def this_log(self):
+        return self.home / ".local" / "share" / "claude-token-tracker" / "limits.jsonl"
+
+    def windows_log(self):
+        return self.win / "AppData" / "Local" / "claude-token-tracker" / "limits.jsonl"
+
+    def test_calls_a_day_after_the_last_sample_make_the_log_stale(self):
+        log = self.log(self.this_log(), sample(60, five=2, seven=1))
+        result = self.report([call(55, source=self.mine), call(60 + 2 * DAY, source=self.mine)])
+        self.assertEqual(result["stale_logs"], [{"log": str(log), "last_sample": iso(START + 60),
+                                                 "last_call": iso(START + 60 + 2 * DAY),
+                                                 "enable": "python3 statusline.py --install"}])
+
+    def test_calls_within_a_day_keep_the_log_fresh(self):
+        self.log(self.this_log(), sample(60, five=2, seven=1))
+        result = self.report([call(55, source=self.mine), call(60 + DAY - 60, source=self.mine)])
+        self.assertEqual(result["stale_logs"], [])
+
+    def test_no_log_is_not_stale(self):
+        """Never installed on that side is the user's choice, already explained by the 'turn them on' line."""
+        result = self.report([call(60 + 2 * DAY, source=self.mine)])
+        self.assertEqual(result["stale_logs"], [])
+
+    def test_each_log_is_judged_on_its_own_sides_calls(self):
+        self.log(self.this_log(), sample(60 + 2 * DAY, five=2, seven=1))
+        theirs = self.log(self.windows_log(), sample(60, five=1, seven=1))
+        only_mine = self.report([call(60 + 2 * DAY, source=self.mine)], other_homes=[self.win])
+        self.assertEqual(only_mine["stale_logs"], [])
+        both = self.report([call(60 + 2 * DAY, source=self.mine), call(60 + 2 * DAY, source=self.theirs)],
+                           other_homes=[self.win])
+        self.assertEqual([(s["log"], s["enable"]) for s in both["stale_logs"]],
+                         [(str(theirs), "python statusline.py --install")])
+
+    def test_stale_lines_name_the_log_and_the_command(self):
+        log = self.log(self.this_log(), sample(60, five=2, seven=1))
+        result = self.report([call(60 + 2 * DAY, source=self.mine)])
+        (line,) = limits.stale_lines(result, tz=timezone.utc)
+        self.assertIn(str(log), line)
+        self.assertIn("python3 statusline.py --install", line)
+        self.assertIn("since " + datetime.fromtimestamp(START + 60, timezone.utc).strftime("%d %b %H:%M"), line)
+        self.assertEqual(limits.stale_lines({"samples": 0}), [])
 
 
 class TestSummaryLines(unittest.TestCase):

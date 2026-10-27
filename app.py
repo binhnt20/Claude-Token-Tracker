@@ -23,6 +23,7 @@ from typing import Callable, Mapping
 
 import limits
 import track_tokens
+from sources import data_dir
 from track_tokens import TranscriptsNotFound, build_report, print_summary, save_report
 from dashboard import generate_html, ASSETS_DIR
 
@@ -149,10 +150,10 @@ def _uninstall_desktop_entry():
         print("  Nothing to remove.")
 
 
-def scan_and_report() -> tuple[dict, str]:
+def scan_and_report(progress: Callable[[int, int], None] | None = None) -> tuple[dict, str]:
     """Scan transcripts, build report (no date filter - all data), return (report, html)."""
     print("Scanning Claude Code transcripts...")
-    all_entries, project_totals = track_tokens.collect_all_entries()
+    all_entries, project_totals = track_tokens.collect_all_entries(progress=progress)
     print(f"Found {len(all_entries):,} responses across {len(project_totals)} projects")
 
     report = build_report(all_entries, project_totals, date_filter=None)
@@ -189,31 +190,34 @@ SCANNING_HTML = ("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"
                  "color:#f1f5f9}@media (prefers-color-scheme: light){body{background:#f1f5f9;color:#1e293b}}</style>"
                  "</head><body><h1>Scanning Claude Code transcripts\u2026</h1>"
                  "<p>The dashboard opens here when the scan is done. A first scan of a long history can take a minute."
-                 "</p></body></html>")
+                 "</p><p id=\"progress\"></p><script>function setProgress(done, total) {"
+                 "document.getElementById('progress').textContent = 'Read ' + done.toLocaleString() + ' of ' + "
+                 "total.toLocaleString() + ' transcript files';}</script></body></html>")
 
 
-def scan_page() -> str:
+def scan_page(progress: Callable[[int, int], None] | None = None) -> str:
     """The dashboard, or a page that says where transcripts were looked for."""
     try:
-        _report, html = scan_and_report()
+        _report, html = scan_and_report(progress=progress)
     except TranscriptsNotFound as exc:
         print(exc, file=sys.stderr)
         html = not_found_html(exc)
     return html
 
 
-def once(make: Callable[[], str]) -> Callable[[], str]:
+def once(make: Callable[..., str]) -> Callable[..., str]:
     """make, run at most once: a fallback after the window already scanned reuses the page."""
     lock, result = threading.Lock(), []
 
-    def call() -> str:
+    def call(progress: Callable[[int, int], None] | None = None) -> str:
         with lock:
             if not result:
-                result.append(make())
+                result.append(make(progress))
             return result[0]
     return call
 
 
+PROGRESS_EVERY_S = 0.5
 PAGE_FOLDER_PREFIX = "claude-token-tracker-"
 STALE_PAGE_SECONDS = 24 * 60 * 60
 
@@ -269,7 +273,7 @@ def _write_page(folder: Path, html: str) -> Path:
     return page
 
 
-def open_native_window(make_html: Callable[[], str]):
+def open_native_window(make_html: Callable[[Callable[[int, int], None]], str]):
     """Open the dashboard in a native OS window using pywebview.
 
     The window opens at once on a "Scanning" page and make_html runs behind it, so a long first scan is not a minute
@@ -299,9 +303,22 @@ def open_native_window(make_html: Callable[[], str]):
             min_size=(800, 600),
         )
 
+        last_shown = [0.0]
+
+        def show_progress(done: int, total: int):
+            """At most twice a second (the first and the last always): each call waits for the page's answer."""
+            now = time.monotonic()
+            if window.events.closed.is_set() or (0 < done < total and now - last_shown[0] < PROGRESS_EVERY_S):
+                return
+            last_shown[0] = now
+            try:
+                window.evaluate_js(f"window.setProgress && setProgress({done}, {total})")
+            except Exception:
+                pass  # the page is not ready yet or already gone; the next call tries again
+
         def show_page():
             try:
-                html = make_html()
+                html = make_html(show_progress)
             except Exception as exc:
                 traceback.print_exc()
                 html = error_html(exc)
@@ -334,6 +351,58 @@ def open_in_browser(html: str):
     webbrowser.open(html_path.as_uri())
 
 
+LOCK_NAME = "app.lock"
+_instance_lock = None
+
+
+def lock_path() -> Path:
+    return data_dir(sys.platform, os.environ, Path.home()) / LOCK_NAME
+
+
+def _lock(path: Path):
+    """An open handle holding an OS lock on path, or None when another handle holds it. The OS drops the lock when
+    the process ends, so a crash leaves nothing stale. Raises OSError when the file cannot be opened."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def hold_single_instance(path: Path | None = None) -> bool:
+    """False when another app on this side is open: two clicks ran two full scans side by side.
+
+    A lock file that cannot be made does not stop the app: two scans are better than no window.
+    """
+    global _instance_lock
+    if _instance_lock is not None:
+        return True
+    try:
+        handle = _lock(lock_path() if path is None else path)
+    except OSError:
+        return True
+    if handle is None:
+        return False
+    _instance_lock = handle
+    return True
+
+
+def release_single_instance() -> None:
+    global _instance_lock
+    if _instance_lock is not None:
+        _instance_lock.close()
+        _instance_lock = None
+
+
 def main():
     track_tokens.safe_console()
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
@@ -348,6 +417,10 @@ def main():
 
     if len(sys.argv) > 1 and sys.argv[1] == "--uninstall":
         _uninstall_desktop_entry()
+        sys.exit(0)
+
+    if not hold_single_instance():
+        print(f"{APP_NAME} is already open; this second copy closes.", file=sys.stderr)
         sys.exit(0)
 
     page = once(scan_page)

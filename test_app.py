@@ -32,11 +32,30 @@ except (ImportError, ValueError):
     Gio = GLib = None
 
 
+_LOCK_DIR = tempfile.TemporaryDirectory()
+_lock_patch = mock.patch.object(app, "lock_path", return_value=Path(_LOCK_DIR.name, "app.lock"))
+
+
+def setUpModule():
+    """main() takes the single-instance lock: keep it off the user's data folder, where a running app holds it."""
+    _lock_patch.start()
+
+
+def tearDownModule():
+    _lock_patch.stop()
+    app.release_single_instance()
+    _LOCK_DIR.cleanup()
+
+
 class FakeWindow:
     def __init__(self):
         self.events = types.SimpleNamespace(closed=threading.Event())
         self.loaded_urls, self.pages, self.folder_files = [], [], []
         self.loaded = threading.Event()
+        self.scripts = []
+
+    def evaluate_js(self, script):
+        self.scripts.append(script)
 
     def load_url(self, url):
         # Read now: the folder goes when the window closes.
@@ -83,7 +102,7 @@ class TestNativeWindow(unittest.TestCase):
     def open(self, html: str) -> FakeWebview:
         fake = FakeWebview()
         with mock.patch.dict(sys.modules, {"webview": fake}):
-            app.open_native_window(lambda: html)
+            app.open_native_window(lambda progress=None: html)
         return fake
 
     def test_page_is_loaded_from_a_file_not_passed_inline(self):
@@ -108,7 +127,7 @@ class TestNativeWindow(unittest.TestCase):
         scanned = threading.Event()
         seen = {}
 
-        def make_html():
+        def make_html(progress=None):
             scanned.set()
             return "<p>dashboard</p>"
 
@@ -126,9 +145,58 @@ class TestNativeWindow(unittest.TestCase):
         self.assertIn("Scanning", fake.first)
         self.assertEqual(fake.loaded, "<p>dashboard</p>")
 
+    def test_the_scanning_page_shows_how_many_files_are_read(self):
+        """A scan of 8.6 GB took up to 7 minutes behind a page that never changed: hung or working?"""
+        def make_html(progress):
+            progress(0, 3000)
+            for done in range(1, 3001):
+                progress(done, 3000)
+            return "<p>dashboard</p>"
+
+        fake = FakeWebview()
+        with mock.patch.dict(sys.modules, {"webview": fake}):
+            app.open_native_window(make_html)
+        self.assertIn("function setProgress", fake.first)
+        scripts = fake.window.scripts
+        self.assertEqual(scripts[0], "window.setProgress && setProgress(0, 3000)")
+        self.assertEqual(scripts[-1], "window.setProgress && setProgress(3000, 3000)")
+        self.assertLess(len(scripts), 10, "at most twice a second, plus the first and the last")
+
+    def test_progress_that_cannot_reach_the_page_does_not_stop_the_scan(self):
+        def make_html(progress):
+            progress(0, 1)
+            progress(1, 1)
+            return "<p>dashboard</p>"
+
+        fake = FakeWebview()
+        original = fake.create_window
+
+        def create_window(title, **kwargs):
+            window = original(title, **kwargs)
+            window.evaluate_js = mock.Mock(side_effect=RuntimeError("page not ready"))
+            return window
+
+        fake.create_window = create_window
+        with mock.patch.dict(sys.modules, {"webview": fake}):
+            app.open_native_window(make_html)
+        self.assertEqual(fake.loaded, "<p>dashboard</p>")
+
+    def test_a_closed_window_gets_no_progress(self):
+        def make_html(progress):
+            fake.window.events.closed.set()
+            progress(1, 1)
+            return "<p>dashboard</p>"
+
+        fake = FakeWebview()
+        fake.start = lambda func=None, **kwargs: func()
+        with mock.patch.dict(sys.modules, {"webview": fake}):
+            app.open_native_window(make_html)
+            time.sleep(0.2)
+        self.assertEqual(fake.window.scripts, [])
+
     def test_a_failed_scan_says_why_in_the_window(self):
         """Otherwise the window would say 'Scanning' forever."""
-        def make_html():
+        def make_html(progress=None):
             raise ValueError("bad <line>")
 
         err = io.StringIO()
@@ -148,7 +216,7 @@ class TestNativeWindow(unittest.TestCase):
         self.addCleanup(release.set)
         seen = {}
 
-        def make_html():
+        def make_html(progress=None):
             seen["daemon"] = threading.current_thread().daemon
             release.wait(10)
             return "<p>late</p>"
@@ -192,7 +260,7 @@ class TestNativeWindow(unittest.TestCase):
 
         fake.start = start
         with mock.patch.dict(sys.modules, {"webview": fake}), self.assertRaises(RuntimeError):
-            app.open_native_window(lambda: "<p>hi</p>")
+            app.open_native_window(lambda progress=None: "<p>hi</p>")
         self.assertFalse(seen["folder"].exists())
 
     def test_page_name_cannot_be_guessed(self):
@@ -235,7 +303,7 @@ class TestNativeWindowBlocker(unittest.TestCase):
                 mock.patch.object(app, "native_window_blocker", return_value="no display"), \
                 mock.patch.object(app.tempfile, "mkdtemp") as mkdtemp, \
                 self.assertRaisesRegex(RuntimeError, "no display"):
-            app.open_native_window(lambda: "<p>hi</p>")
+            app.open_native_window(lambda progress=None: "<p>hi</p>")
         mkdtemp.assert_not_called()
         self.assertEqual(fake.windows, [])
 
@@ -272,7 +340,7 @@ class TestBackendLog(unittest.TestCase):
         allow_native_window(self)
         with mock.patch.dict(sys.modules, {"webview": FakeWebview()}), \
                 mock.patch.object(app, "quiet_backend_tracebacks") as quiet:
-            app.open_native_window(lambda: "<p>hi</p>")
+            app.open_native_window(lambda progress=None: "<p>hi</p>")
         quiet.assert_called_once_with()
 
 
@@ -302,7 +370,7 @@ class TestStalePages(unittest.TestCase):
         unrelated = self.folder("someone-else-old", age_hours=48)
         fake = FakeWebview()
         with mock.patch.dict(sys.modules, {"webview": fake}):
-            app.open_native_window(lambda: "<p>hi</p>")
+            app.open_native_window(lambda progress=None: "<p>hi</p>")
         self.assertFalse(old.exists())
         self.assertTrue(running.exists())
         self.assertTrue(unrelated.exists())
@@ -359,18 +427,71 @@ class TestNoTranscripts(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             app.main()
             (make_html,), _ = window.call_args
-            page = make_html()
+            page = make_html(None)
         self.assertIn(str(folders[0]), page)
         self.assertIn(html_lib.escape(str(folders[1])), page)
         self.assertIn("&lt;odd&gt;", page)
         self.assertIn("CLAUDE_CONFIG_DIR", page)
 
 
+class TestSingleInstance(unittest.TestCase):
+    """Two clicks on the launcher ran two full scans of the whole history side by side, each one slower."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.lock = Path(tmp.name, "claude-token-tracker", "app.lock")
+        app.release_single_instance()
+        self.addCleanup(app.release_single_instance)
+
+    def run_main(self):
+        err = io.StringIO()
+        with mock.patch.object(app, "lock_path", return_value=self.lock), \
+                mock.patch.object(app, "open_native_window") as window, \
+                mock.patch.object(app.sys, "argv", ["app.py"]), contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                app.main()
+        return window, caught.exception.code, err.getvalue()
+
+    def other_app(self):
+        """The first app: a second handle on the lock file, held as another process would hold it."""
+        held = app._lock(self.lock)
+        self.assertIsNotNone(held)
+        self.addCleanup(held.close)
+        return held
+
+    def test_a_second_app_exits_while_the_first_runs(self):
+        self.other_app()
+        window, code, err = self.run_main()
+        window.assert_not_called()
+        self.assertEqual(code, 0)
+        self.assertIn("already open", err)
+
+    def test_the_first_app_opens_and_holds_the_lock(self):
+        with mock.patch.object(app, "lock_path", return_value=self.lock), \
+                mock.patch.object(app, "open_native_window") as window, \
+                mock.patch.object(app.sys, "argv", ["app.py"]), contextlib.redirect_stdout(io.StringIO()):
+            app.main()
+        window.assert_called_once()
+        self.assertIsNone(app._lock(self.lock), "held until the process ends")
+        app.release_single_instance()
+        held = app._lock(self.lock)
+        self.assertIsNotNone(held)
+        held.close()
+
+    def test_a_folder_it_cannot_write_does_not_stop_the_app(self):
+        blocker = self.lock.parent
+        blocker.parent.mkdir(parents=True, exist_ok=True)
+        blocker.write_text("a file where the folder should be", encoding="utf-8")
+        self.assertTrue(app.hold_single_instance(self.lock))
+
+
 class TestFallbackScan(unittest.TestCase):
     def test_the_browser_gets_the_page_the_window_already_scanned(self):
         """A window that dies after its scan must not cost a second scan of the whole history."""
         def window(make_html):
-            make_html()
+            make_html(None)
             raise RuntimeError("window died")
 
         with mock.patch.object(app, "scan_and_report", return_value=({}, "<p>dashboard</p>")) as scan, \
@@ -378,7 +499,7 @@ class TestFallbackScan(unittest.TestCase):
                 mock.patch.object(app, "open_in_browser") as browser, \
                 mock.patch.object(app.sys, "argv", ["app.py"]), contextlib.redirect_stdout(io.StringIO()):
             app.main()
-        scan.assert_called_once_with()
+        scan.assert_called_once_with(progress=None)
         browser.assert_called_once_with("<p>dashboard</p>")
 
 

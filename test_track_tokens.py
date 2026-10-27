@@ -229,6 +229,14 @@ class TestLineQuality(TranscriptCase):
 
 
 class TestCollectAllEntries(TranscriptCase):
+    def test_progress_counts_files_after_listing_them_all(self):
+        self.write([assistant_line(msg_id="m1")], name="a.jsonl", folder="-work-a")
+        self.write([assistant_line(msg_id="m2")], name="b.jsonl", folder="-work-b")
+        seen = []
+        with mock.patch.object(track_tokens, "transcript_roots", return_value=[Path(self.tmp.name)]):
+            collect_all_entries(progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(0, 2), (1, 2), (2, 2)])
+
     def test_project_totals_count_each_call_once(self):
         self.write([assistant_line(output=8), assistant_line(output=471)], name="a.jsonl", folder="-work-repo")
         self.write([assistant_line(output=471)], name="b.jsonl", folder="-work-repo")
@@ -253,7 +261,7 @@ class TestCollectAllEntries(TranscriptCase):
 
     def test_not_found_names_every_folder_looked_in(self):
         missing = [Path(self.tmp.name) / "a", Path(self.tmp.name) / "b"]
-        env = {"CLAUDE_CONFIG_DIR": ",".join(str(m) for m in missing)}
+        env = {"CLAUDE_TOKEN_TRACKER_DIRS": ",".join(str(m) for m in missing)}
         with mock.patch.dict(os.environ, env), self.assertRaises(TranscriptsNotFound) as caught:
             collect_all_entries()
         self.assertEqual(caught.exception.candidates, [m / "projects" for m in missing])
@@ -484,6 +492,19 @@ class TestPrintSummary(TranscriptCase):
         self.assertIn("CLAUDE CODE SHARE OF PLAN LIMITS (estimate)", out.getvalue())
         self.assertIn("python3 statusline.py --install", out.getvalue())
 
+    def test_stale_log_warning_line(self):
+        report = build_report([], {})
+        report["limits"] = {"windows": [], "current": {"five_hour": None, "seven_day": None}, "samples": 3,
+                            "enable": "python3 statusline.py --install", "logs": [],
+                            "stale_logs": [{"log": "/mnt/c/u/limits.jsonl", "last_sample": "2026-10-14T23:56:36.783Z",
+                                            "last_call": "2026-10-26T14:00:00.000Z",
+                                            "enable": "python statusline.py --install"}]}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            track_tokens.print_summary(report)
+        self.assertIn("No samples in /mnt/c/u/limits.jsonl since", out.getvalue())
+        self.assertIn("Run `python statusline.py --install` there again.", out.getvalue())
+
     def test_non_ascii_project_on_a_cp1252_stdout(self):
         """A redirected Windows stdout is cp1252; a Vietnamese folder name must not crash the summary."""
         self.write([assistant_line(cwd="D:\\Dự án\\repo")], folder="D--D--n-repo")
@@ -511,13 +532,19 @@ class TestSources(unittest.TestCase):
     def test_config_dir_list(self):
         a, b = self.mkdirs("a/projects", "b/projects")
         env = {"CLAUDE_CONFIG_DIR": f"{self.base / 'a'},{self.base / 'b'}"}
-        self.assertEqual(transcript_roots(env=env, home=self.base / "home"), [a, b])
+        self.assertEqual(transcript_roots(env=env, home=self.base / "home", other_homes=[]), [a, b])
 
-    def test_config_dir_replaces_the_defaults(self):
-        (only,) = self.mkdirs("a/projects")
-        self.mkdirs("home/.claude/projects")
+    def test_config_dir_comes_before_the_defaults(self):
+        """Orca and other account switchers set CLAUDE_CONFIG_DIR in every shell: it must not hide ~/.claude."""
+        first, legacy = self.mkdirs("a/projects", "home/.claude/projects")
         env = {"CLAUDE_CONFIG_DIR": str(self.base / "a")}
-        self.assertEqual(transcript_roots(env=env, home=self.base / "home"), [only])
+        self.assertEqual(transcript_roots(env=env, home=self.base / "home", other_homes=[]), [first, legacy])
+
+    def test_tracker_dirs_replace_every_default(self):
+        (only,) = self.mkdirs("a/projects")
+        self.mkdirs("home/.claude/projects", "b/projects")
+        env = {"CLAUDE_TOKEN_TRACKER_DIRS": str(self.base / "a"), "CLAUDE_CONFIG_DIR": str(self.base / "b")}
+        self.assertEqual(transcript_roots(env=env, home=self.base / "home", other_homes=[]), [only])
 
     def test_default_reads_both_home_dirs(self):
         legacy, xdg = self.mkdirs("home/.claude/projects", "home/.config/claude/projects")
@@ -528,6 +555,10 @@ class TestSources(unittest.TestCase):
         self.assertEqual(transcript_candidates(env={}, home=home, other_homes=[]),
                          [home / ".claude" / "projects", home / ".config" / "claude" / "projects"])
         env = {"CLAUDE_CONFIG_DIR": f"{self.base / 'a'}, {self.base / 'b'}"}
+        self.assertEqual(transcript_candidates(env=env, home=home, other_homes=[]),
+                         [self.base / "a" / "projects", self.base / "b" / "projects",
+                          home / ".claude" / "projects", home / ".config" / "claude" / "projects"])
+        env = {"CLAUDE_TOKEN_TRACKER_DIRS": f"{self.base / 'a'}, {self.base / 'b'}"}
         self.assertEqual(transcript_candidates(env=env, home=home),
                          [self.base / "a" / "projects", self.base / "b" / "projects"])
 
@@ -579,8 +610,16 @@ class TestSources(unittest.TestCase):
     def test_a_windows_path_means_nothing_off_linux(self):
         self.assertEqual(other_side_homes({"PATH": self.WINDOWS_PATH}, "darwin"), [])
 
-    def test_config_dir_also_replaces_the_other_side(self):
+    def test_config_dir_keeps_the_other_side(self):
+        home, windows = self.base / "home", Path("/mnt/c/Users/me")
         env = {"CLAUDE_CONFIG_DIR": str(self.base / "a"), "PATH": self.WINDOWS_PATH}
+        self.assertEqual(transcript_candidates(env=env, home=home, platform="linux"),
+                         [self.base / "a" / "projects", home / ".claude" / "projects",
+                          home / ".config" / "claude" / "projects",
+                          windows / ".claude" / "projects", windows / ".config" / "claude" / "projects"])
+
+    def test_tracker_dirs_also_replace_the_other_side(self):
+        env = {"CLAUDE_TOKEN_TRACKER_DIRS": str(self.base / "a"), "PATH": self.WINDOWS_PATH}
         self.assertEqual(transcript_candidates(env=env, home=self.base / "home", platform="linux"),
                          [self.base / "a" / "projects"])
 
