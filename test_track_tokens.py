@@ -18,7 +18,7 @@ from unittest import mock
 import limits
 import pricing
 import track_tokens
-from sources import (iter_transcripts, other_side_homes, running_wsl_distros, transcript_candidates,
+from sources import (iter_transcripts, other_side_homes, running_wsl_distros, transcript_candidates, wsl_exe,
                      transcript_roots, windows_homes_on_path, wsl_distro_homes)
 from track_tokens import (
     TranscriptsNotFound,
@@ -653,6 +653,14 @@ class TestSources(unittest.TestCase):
             raise FileNotFoundError("wsl.exe")
         self.assertEqual(running_wsl_distros(run=no_wsl), [])
 
+    def test_wsl_exe_is_the_system_copy_not_one_in_the_current_folder(self):
+        """By bare name, Windows would run a wsl.exe planted in the app's or the current folder first."""
+        env = {"SystemRoot": r"D:\Win"}
+        self.assertEqual(wsl_exe(env, exists=lambda p: False), r"D:\Win\System32\wsl.exe")
+        # A 32-bit Python on 64-bit Windows sees System32 redirected to SysWOW64, which has no wsl.exe.
+        self.assertEqual(wsl_exe(env, exists=lambda p: True), r"D:\Win\Sysnative\wsl.exe")
+        self.assertEqual(wsl_exe({}, exists=lambda p: False), r"C:\Windows\System32\wsl.exe")
+
     def test_listing_running_distros_starts_none(self):
         """`--running` lists without starting a stopped distro, and no console window flashes on Windows."""
         calls = []
@@ -662,7 +670,9 @@ class TestSources(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, stdout=b"")
         running_wsl_distros(run=wsl_exe)
         ((args, kwargs),) = calls
-        self.assertEqual(args, ["wsl.exe", "--list", "--running", "--quiet"])
+        self.assertEqual(args[1:], ["--list", "--running", "--quiet"])
+        self.assertTrue(PureWindowsPath(args[0]).is_absolute())
+        self.assertEqual(PureWindowsPath(args[0]).name, "wsl.exe")
         self.assertEqual(kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.assertIn("timeout", kwargs)
 
